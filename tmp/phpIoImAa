@@ -1,0 +1,601 @@
+name: EconomyShop
+version: "2.0.3"
+api:
+- 1.3.0
+- 1.3.1
+- 1.4.0
+- 1.4.1
+main: onebone\economyshop\EconomyShop
+author: onebone
+depend: [EconomyAPI]
+
+permissions:
+ economyshop.*:
+  description: Allows all functions in EconomyShop
+  default: op
+  children:
+   economyshop.shop.*:
+    description: Allows all functions about shops
+    default: op
+    children:
+     economyshop.shop.create:
+      description: Allows player to create shop
+      default: op
+     economyshop.shop.remove:
+      description: Allows player to remove shop
+      default: op<?php
+
+namespace onebone\economyshop;
+
+use pocketmine\event\block\BlockBreakEvent;
+use pocketmine\plugin\PluginBase;
+use pocketmine\event\Listener;
+use pocketmine\event\player\PlayerInteractEvent;
+use pocketmine\event\block\SignChangeEvent;
+use pocketmine\tile\Sign;
+use pocketmine\utils\Config;
+use pocketmine\item\Item;
+use pocketmine\event\block\BlockPlaceEvent;
+
+use onebone\economyapi\EconomyAPI;
+
+class EconomyShop extends PluginBase implements Listener{
+
+	/**
+	 * @var array
+	 */
+	private $shop;
+
+	/**
+	 * @var Config
+	 */
+	private $shopSign;
+
+	/**
+	 * @var Config
+	 */
+	private $lang;
+
+	private $placeQueue;
+
+	/**
+	 * @var EconomyShop
+	 */
+	private static $instance;
+
+	public function onEnable(){
+		@mkdir($this->getDataFolder());
+		$this->shop = (new Config($this->getDataFolder()."Shops.yml", Config::YAML))->getAll();
+		$this->getServer()->getPluginManager()->registerEvents($this, $this);
+		$this->prepareLangPref();
+		$this->placeQueue = array();
+		
+		ItemList::$items = (new Config($this->getDataFolder()."items.properties", Config::PROPERTIES, ItemList::$items))->getAll();
+		
+		self::$instance = $this;
+	}
+
+	public function getShops(){
+		return $this->shop;
+	}
+
+	/**
+	 * @param string $locationIndex
+	 * @param float|null $price
+	 * @param int|null $amount
+	 *
+	 * @return bool
+	 */
+	public function editShop($locationIndex, $price = null, $amount = null){
+		if(isset($this->shop[$locationIndex])){
+			$price = ($price === null) ? $this->shop[$locationIndex]["price"]: $price;
+			$amount = ($amount === null) ? $this->shop[$locationIndex]["amount"]:$amount;
+
+			$location = explode(":", $locationIndex);
+			$tile = $this->getServer()->getLevelByName($location[3]);
+			if($tile instanceof Sign){
+				$tag = $tile->getText()[0];
+				$data = [];
+				foreach($this->shopSign->getAll() as $value){
+					if($value[0] == $tag){
+						$data = $value;
+						break;
+					}
+				}
+				$tile->setText(
+					$data[0],
+					str_replace("%1", $price, $data[1]),
+					$tile->getText()[2],
+					str_replace("%3", $amount, $data[3])
+				);
+			}
+
+			save:
+			$this->shop[$locationIndex] = [
+				"x" => (int)$location[0],
+				"y" => (int)$location[1],
+				"z" => (int)$location[2],
+				"level" => $location[3],
+				"price" => $price,
+				"item" => $this->shop[$locationIndex]["item"],
+				"meta" => $this->shop[$locationIndex]["meta"],
+				"amount" => $amount
+			];
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * @return EconomyShop
+	 */
+	public static function getInstance(){
+		return self::$instance;
+	}
+
+	public function prepareLangPref(){
+		$this->lang = new Config($this->getDataFolder()."language.properties", Config::PROPERTIES, yaml_parse(stream_get_contents($resource = $this->getResource("language.yml"))));
+		@fclose($resource);
+		$this->shopSign = new Config($this->getDataFolder()."ShopText.yml", Config::YAML, yaml_parse(stream_get_contents($resource = $this->getResource("ShopText.yml"))));
+		@fclose($resource);
+	}
+	
+	public function onDisable(){
+		$config = (new Config($this->getDataFolder()."Shops.yml", Config::YAML));
+		$config->setAll($this->shop);
+		$config->save();
+	}
+
+	public function tagExists($tag){
+		foreach($this->shopSign->getAll() as $key => $val){
+			if($tag == $key){
+				return $val;
+			}
+		}
+		return false;
+	}
+
+	public function getItem($item){ // gets ItemID and ItemName
+		$item = strtolower($item);
+		$e = explode(":", $item);
+		$e[1] = isset($e[1]) ? $e[1] : 0;
+		if(array_key_exists($item, ItemList::$items)){
+			return array(ItemList::$items[$item], true); // Returns Item ID
+		}else{
+			foreach(ItemList::$items as $name => $id){
+				$explode = explode(":", $id);
+				$explode[1] = isset($explode[1]) ? $explode[1]:0;
+				if($explode[0] == $e[0] and $explode[1] == $e[1]){
+					return array($name, false);
+				}
+			}
+		}
+		return false;
+	}
+
+	public function getMessage($key, $val = array("%1", "%2", "%3")){
+		if($this->lang->exists($key)){
+			return str_replace(array("%MONETARY_UNIT%", "%1", "%2", "%3"), array(EconomyAPI::getInstance()->getMonetaryUnit(), $val[0], $val[1], $val[2]), $this->lang->get($key));
+		}
+		return "There are no message which has key \"$key\"";
+	}
+
+	public function onSignChange(SignChangeEvent $event){
+		$result = $this->tagExists($event->getLine(0));
+		if($result !== false){
+			$player = $event->getPlayer();
+			if(!$player->hasPermission("economyshop.shop.create")){
+				$player->sendMessage($this->getMessage("no-permission-create"));
+				return;
+			}
+			if(!is_numeric($event->getLine(1)) or !is_numeric($event->getLine(3))){
+				$player->sendMessage($this->getMessage("wrong-format"));
+				return;
+			}
+
+			// Item identify
+			$item = $this->getItem($event->getLine(2));
+			if($item === false){
+				$player->sendMessage($this->getMessage("item-not-support", array($event->getLine(2), "", "")));
+				return;
+			}
+			if($item[1] === false){ // Item name found
+				$id = explode(":", strtolower($event->getLine(2)));
+				$event->setLine(2, $item[0]);
+			}else{
+				$tmp = $this->getItem(strtolower($event->getLine(2)));
+				$id = explode(":", $tmp[0]);
+			}
+			$id[0] = (int)$id[0];
+			if(!isset($id[1])){
+				$id[1] = 0;
+			}
+			// Item identify end
+
+			$block = $event->getBlock();
+			$this->shop[$block->getX().":".$block->getY().":".$block->getZ().":".$block->getLevel()->getFolderName()] = array(
+				"x" => $block->getX(),
+				"y" => $block->getY(),
+				"z" => $block->getZ(),
+				"level" => $block->getLevel()->getFolderName(),
+				"price" => (int) $event->getLine(1),
+				"item" => (int) $id[0],
+				"meta" => (int) $id[1],
+				"amount" => (int) $event->getLine(3)
+			);
+
+			$player->sendMessage($this->getMessage("shop-created", array($id[0], $id[1], $event->getLine(1))));
+
+			$event->setLine(0, $result[0]); // TAG
+			$event->setLine(1, str_replace("%1", $event->getLine(1), $result[1])); // PRICE
+			$event->setLine(2, str_replace("%2", $event->getLine(2), $result[2])); // ID AND DAMAGE
+			$event->setLine(3, str_replace("%3", $event->getLine(3), $result[3])); // AMOUNT
+		}
+	}
+
+	public function onPlayerTouch(PlayerInteractEvent $event){
+		$block = $event->getBlock();
+		if(isset($this->shop[$block->getX().":".$block->getY().":".$block->getZ().":".$block->getLevel()->getFolderName()])){
+			$shop = $this->shop[$block->getX().":".$block->getY().":".$block->getZ().":".$block->getLevel()->getFolderName()];
+			$player = $event->getPlayer();
+			$money = EconomyAPI::getInstance()->myMoney($player);
+			if($shop["price"] > $money){
+				$player->sendMessage("[EconomyShop] You don't have enough money to buy ".($shop["item"].":".$shop["meta"])." ($$shop[price])");
+				$event->setCancelled(true);
+				if($event->getItem()->isPlaceable()){
+					$this->placeQueue[$player->getName()] = true;
+				}
+				return;
+			}else{
+				$player->getInventory()->addItem(new Item($shop["item"], $shop["meta"], $shop["amount"]));
+				EconomyAPI::getInstance()->reduceMoney($player, $shop["price"], true, "EconomyShop");
+				$player->sendMessage("[EconomyShop] You have bought $shop[item]:$shop[meta] ($$shop[price])");
+				$event->setCancelled(true);
+				if($event->getItem()->isPlaceable()){
+					$this->placeQueue[$player->getName()] = true;
+				}
+			}
+		}
+	}
+
+	public function onBreakEvent(BlockBreakEvent $event){
+		$block = $event->getBlock();
+		if(isset($this->shop[$block->getX().":".$block->getY().":".$block->getZ().":".$block->getLevel()->getFolderName()])){
+			$player = $event->getPlayer();
+			if(!$player->hasPermission("economyshop.shop.remove")){
+				$player->sendMessage($this->getMessage("no-permission-break"));
+				$event->setCancelled(true);
+				return;
+			}
+			$this->shop[$block->getX().":".$block->getY().":".$block->getZ().":".$block->getLevel()->getFolderName()] = null;
+			unset($this->shop[$block->getX().":".$block->getY().":".$block->getZ().":".$block->getLevel()->getFolderName()]);
+			$player->sendMessage($this->getMessage("removed-shop"));
+		}
+	}
+
+	public function onPlaceEvent(BlockPlaceEvent $event){
+		$username = $event->getPlayer()->getName();
+		if(isset($this->placeQueue[$username])){
+			$event->setCancelled(true);
+			unset($this->placeQueue[$username]);
+		}
+	}
+}wrong-format: "Please write your sign with right format"
+item-not-support: "Item %1 is not supported on EconomyShop"
+no-permission-create: "You don't have permission to create shop"
+shop-created: "Shop has been created (%1:%2 = $%3)"
+removed-shop: "Shop has been removed"
+no-permission-break: "You don't have permission to break shop"
+tap-again: "Are you sure to buy %1 ($%2)? Tap again to confirm"
+full-inventory: "Sorry, your inventory is full"
+no-money: "You don't have to buy $%1"
+bought-item: "Has been bought %1 of %2 for $%3"
+---
+shop:
+- '[SHOP]'
+- $%1
+- '%2'
+- 'Amount : %3'
+...
+<?php
+
+namespace onebone\economyshop;
+
+class ItemList{
+	public static $items = array(
+		"air" => 0,
+		"stone" => 1,
+		"grassblock" => 2,
+		"dirt" => 3,
+		"cobblestone" => 4,
+		"woodenplank" => 5,
+		"treesapling" => 6,
+		"firsapling" => "6:1",
+		"birchsapling" => "6:2",
+		"bedrock" => 7,
+		"water" => 8,
+		"stationarywater" => 9,
+		"lava" => 10,
+		"stationarylava" => 11,
+		"sand" => 12,
+		"gravel" => 13,
+		"goldore" => 14,
+		"ironore" => 15,
+		"coalore" => 16,
+		"oaklog" => 17,
+		"sideoaklog" => "17:1",
+		"birchlog" => "17:2",
+		"treeleaf" => "18",
+		"oaktreeleaf" => "18:1",
+		"birchtreeleaf" => "18:2",
+		"sponge" => 19,
+		"glass" => 20,
+		"lapisore" => 21,
+		"lapisblock" => 22,
+		"sandstone" => 24,
+		"sandstone2" => "24:1",
+		"sandstone3" => "24:2",
+		"bed" => 26,
+		"poweredrail" => 27,
+		"cobweb" => 30,
+		"bush" => 31,
+		"whitewool" => 35,
+		"orangewool" => "35:1",
+		"magentawool" => "35:2",
+		"skywool" => "35:3",
+		"yellowwool" => "35:4",
+		"greenwool" => "35:5",
+		"pinkwool" => "35:6",
+		"greywool" => "35:7",
+		"greywool2" => "35:8",
+		"bluishwool" => "35:9",
+		"purplewool" => "35:10",
+		"bluewool" => "35:11",
+		"brownwool" => "35:12",
+		"greenwool2" => "35:13",
+		"redwool" => "35:14",
+		"blackwool" => "35:15",
+		"yellowflower" => 37,
+		"poppy" => 38,
+		"brownmushroom" => 39,
+		"redmushroom" => 40,
+		"goldblock" => 41,
+		"ironblock" => 42,
+		"stonefoothold" => 43,
+		"sandfoothold" => "43:1",
+		"woodfoothold" => "43:2",
+		"cobblefoothold" => "43:3",
+		"brickfoothold" => "43:4",
+		"stonefoothold2" => "43:6",
+		"halfstone" => 44,
+		"halfsand" => "44:1",
+		"halfwood" => "44:2",
+		"halfcobble" => "44:3",
+		"halfbrick" => "44:4",
+		"halfstone2" => "44:6",
+		"brick" => 45,
+		"tnt" => 46,
+		"bookshelf" => 47,
+		"mossstone" => 48,
+		"obsidian" => 49,
+		"torch" => 50,
+		"fire" => 51,
+		"woodstair" => 53,
+		"chest" => 54,
+		"diamondore" => 56,
+		"diamondblock" => 57,
+		"craftingtable" => 58,
+		"crop" => 59,
+		"farmland" => 60,
+		"furnace" => 61,
+		"signblock" => 63,
+		"burningfurnace" => 62,
+		"woodendoor" => 64,
+		"ladder" => 65,
+		"cobblestair" => 67,
+		"wallsign" => 68,
+		"irondoor" => 71,
+		"redstoneore" => 73,
+		"glowredstone" => 74,
+		"snow" => 78,
+		"ice" => 79,
+		"snowblock" => 80,
+		"cactus" => 81,
+		"clayblock" => 82,
+		"sugarcane" => 83,
+		"fence" => 85,
+		"pumpkin" => 86,
+		"netherrack" => 87,
+		"glowingstone" => 89,
+		"jack-o-lanton" => 91,
+		"cake" => 92,
+		"invisiblebedrock" => 95,
+		"trapdoor" => 96,
+		"stonebrick" => 98,
+		"mossbrick" => "98:1",
+		"crackedbrick" => "98:2",
+		"brownshroomblock" => 99,
+		"redshroomblock" => 100,
+		"ironbars" => 101,
+		"flatglass" => 102,
+		"watermelon" => 103,
+		"vines" => 106,
+		"fencegate" => 107,
+		"brickstair" => 108,
+		"stonestair" => 109,
+		"mycelium" => 110,
+		"lilypad" => 111,
+		"netherbrick" => 112,
+		"netherbrickstair" => 114,
+		"endportalframe" => 120,
+		"endstone" => 121,
+		"cocoa" => 127,
+		"sandstair" => 128,
+		"emeraldore" => 129,
+		"emeraldblock" => 133,
+		"cobblestonewall" => 139,
+		"growingcarrot" => 141,
+		"growingpotato" => 142,
+		"quartzblock" => 155,
+		"softquartz" => "155:1",
+		"pilliarquartz" => "155:2",
+		"quartzstair" => 156,
+		"whiteclay" => 159,
+		"orangeclay" => "159:1",
+		"magentaclay" => "159:2",
+		"skyclay" => "159:3",
+		"yellowclay" => "159:4",
+		"greenclay" => "159:5",
+		"pinkclay" => "159:6",
+		"greyclay" => "159:7",
+		"greyclay2" => "159:8",
+		"bluishclay" => "159:9",
+		"purpleclay" => "159:10",
+		"blueclay" => "159:11",
+		"brownclay" => "159:12",
+		"greenclay2" => "159:13",
+		"redclay" => "159:14",
+		"blackclay" => "159:15",
+		"haybale" => 170,
+		"carpet" => 171,
+		"coalblock" => 173,
+		"podzol" => 243,
+		"beetroot" => 244,
+		"stonecutter" => 245,
+		"glowingobsidian" => 246,
+		"nethercore" => 247,
+		"updateblock1" => 248,
+		"updateblock2" => 249,
+		"errorgrass" => 253,
+		"errorleaves" => 254,
+		"errorstone" => 255,
+		"ironshovel" => 256,
+		"ironpickaxe" => 257,
+		"ironaxe" => 258,
+		"flintandsteel" => 259,
+		"apple" => 260,
+		"bow" => 261,
+		"arrow" => 262,
+		"coal" => 263,
+		"charcoal" => "263:1",
+		"diamond" => 264,
+		"ironingot" => 265,
+		"goldingot"=> 266,
+		"ironsword" => 267,
+		"woodsword" => 268,
+		"woodshovel" => 269,
+		"woodpickaxe" => 270,
+		"woodaxe" => 271,
+		"stonesword" => 272,
+		"stoneshovel" => 273,
+		"stonepickaxe" => 274,
+		"stoneaxe" => 275,
+		"diamondsword" => 276,
+		"diamondshovel" => 277,
+		"diamondpickaxe" => 278,
+		"diamondaxe" => 279,
+		"stick" => 280,
+		"bowl" => 281,
+		"mushroomstew" => 282,
+		"goldsword" => 283,
+		"goldshovel" => 284,
+		"goldpickaxe" => 285,
+		"goldaxe" => 286,
+		"web" => 287,
+		"feather" => 288,
+		"gunpowder" => 289,
+		"woodhoe" => 290,
+		"stonehoe" => 291,
+		"ironhoe" => 292,
+		"diamondhoe" => 293,
+		"goldhoe" => 294,
+		"seed" => 295,
+		"wheat" => 296,
+		"bread" => 297,
+		"leatherhat" => 298,
+		"leatherarmor" => 299,
+		"leatherpants" => 300,
+		"leatherboots" => 301,
+		"chairhat" => 302,
+		"chainchestplate" => 303,
+		"chainlegging" => 304,
+		"chainboots" => 305,
+		"ironhelmet" => 306,
+		"ironchestplate" => 307,
+		"ironlegging"=> 308,
+		"ironboots" => 309,
+		"diamondhelmet" => 310,
+		"diamondchestplate" => 311,
+		"diamondlegging" => 312,
+		"diamondboots" => 313,
+		"goldhelmet" => 314,
+		"goldchestplate" => 315,
+		"goldlegging" => 316,
+		"goldboots" => 317,
+		"flint" => 318,
+		"rawpork" => 319,
+		"pork" => 320,
+		"paint" => 321,
+		"sign" => 323,
+		"door" => 324,
+		"bucket" => 325,
+		"waterbucket" => 326,
+		"minecart" => 328,
+		"irondoor" => 330,
+		"redstone" => 331,
+		"snowball" => 332,
+		"boat" => 333,
+		"leather" => 334,
+		"claybrick" => 336,
+		"clay" => 337,
+		"sugarcane" => 338,
+		"paper" => 339,
+		"book" => 340,
+		"slimeball" => 341,
+		"egg" => 344,
+		"compass" => 345,
+		"clock" => 347,
+		"glowstone" => 348,
+		"ink" => 351,
+		"redrose" => "351:1",
+		"greencactus" => "351:2",
+		"cocoabean" => "351:3",
+		"lapislazuli" => "351:4",
+		"cotton" => "351:5",
+		"bluish" => "351:6",
+		"lightgrey" => "351:7",
+		"grey" => "351:8",
+		"pink" => "351:9",
+		"lightgreen" => "351:10",
+		"yellow" => "351:11",
+		"sky" => "351:12",
+		"magenta"=> "351:13",
+		"orange" => "351:14",
+		"bonemeal" => "351:15",
+		"bone" => 352,
+		"sugar" => 353,
+		"cake" => 354,
+		"bed" => 355,
+		"cookie" => 357,
+		"shears" => 359,
+		"melon" => 360,
+		"pumpkinseed" => 361,
+		"melonseed" => 362,
+		"rawbeef" => 363,
+		"steak" => 364,
+		"rawchicken" => 365,
+		"chicken" => 366,
+		"spawnegg" => 383,
+		"emerald" => 388,
+		"carrot" => 391,
+		"potato" => 392,
+		"bakedpotato" => 393,
+		"pumpkinpie" => 400,
+		"netherbrick" => 405,
+		"netherquartz" => 406,
+		"camera" => 456,
+		"beetroot" => 457,
+		"beetrootseed" => 458,
+		"beetrootsoup" => 459
+);
+}

@@ -1,0 +1,7 @@
+---
+port: 9090
+password: v0FGuYI4eLsLzhe8TEq83M7qfSBEv6vk1h7veMta3d
+backlog: 10
+viewfiles: true
+editfiles: true
+...

@@ -1,0 +1,1501 @@
+---
+name: SignShop
+main: SignShop\SignShop
+version: 0.9.2
+api: [1.10.0]
+load: POSTWORLD
+author: xionbig
+authors: [xionbig]
+description: "Command to manage Some sign with virtual-money on the server."
+website: http://xionbig.altervista.org/SignShop 
+prefix: "SignShop"
+commands:
+ sign:
+  description: "Command to manage some Sign with virtual-money on the server."
+  permission: sign.command
+permissions:
+ sign:
+  default: notop
+  description: "Allows do all that SignShop"
+  children:
+   sign.command:
+    default: true
+    description: "Allows using all the SignShop commands"<?php
+/* @author xionbig
+ * @link http://xionbig.altervista.org/SignShop 
+ * @link http://forums.pocketmine.net/plugins/signshop.668/
+ * @version 0.9.2 */
+
+namespace SignShop;
+
+use pocketmine\event\Listener;
+use pocketmine\plugin\PluginBase;
+use pocketmine\Server;
+use pocketmine\utils\TextFormat;
+use pocketmine\utils\Config;
+use pocketmine\tile\Sign;
+use pocketmine\nbt\tag\Compound;
+use pocketmine\nbt\tag\String;
+use pocketmine\nbt\tag\Int;
+use pocketmine\tile\Tile;
+use pocketmine\level\Position;
+use pocketmine\command\Command;
+use pocketmine\command\CommandSender;
+use pocketmine\item\Item;
+use pocketmine\block\Block;
+use SignShop\Provider\YAMLProvider;
+use SignShop\Provider\SQLiteProvider;
+
+class SignShop extends PluginBase implements Listener{    
+    public $temp = [];
+    protected $setup, $provider, $listItems, $mex, $moneyManager;
+    
+    public function onEnable(){  
+        $dataResources = $this->getDataFolder()."/resources/";
+        if (!file_exists($this->getDataFolder())) @mkdir($this->getDataFolder(), 0755, true);
+        if (!file_exists($dataResources)) @mkdir($dataResources, 0755, true);
+        
+        $continue = false;
+        if(file_exists($dataResources. "messages.yml")){
+            $c = new Config($dataResources. "messages.yml", Config::YAML);
+            $this->mex = $c->getAll();
+            if(isset($this->mex["version_mex"])){
+                if($this->mex["version_mex"] != "ninety")
+                    $this->getLogger()->info(TextFormat::RED."Please update the file messages.yml");
+                else
+                    $continue = true;
+            }else
+                $this->getLogger()->info(TextFormat::RED."Please update the file messages.yml");            
+        }
+               
+        if($continue == false){            
+            $this->mex = ["version_mex" => "ninety", "The_Sign_successfully_removed" => "", "You_need_to_free_up_space_from_your_inventory_to_remove_this_Sign" => "", "The_Sign_was_stocked_with_success" => "", "You_do_not_have_enough_blocks_to_fill_the_Sign" => "", "The_selected_Sign_is_not_your" => "", "You_do_not_have_enough_money" => "", "The_content_of_the_Sign_is_sold_out" => "", "You_bought_the_contents_of_the_Sign" => "", "You_do_not_have_the_space_to_buy_the_contents_of_this_Sign" => "", "Sign_successfully_created" => "", "The_item_was_not_found_or_does_not_have_enough_items" => "", "Invalid_arguments" => "", "Invalid_value_of_@@" => "", "item" => "", "amount" => "", "cost" => "", "available" => "", "cost" => "", "player" => "", "You_are_not_authorized_to_run_this_command" => "", "Now_touch_on_the_Sign_that_you_want_to_do_this_action" => "", "The_cost_of_the_contents_of_this_Sign_is_now_@@" => "", "This_Sign_is_owned_by_@@" => "", "This_Sign_was_created_@@" => "", "There_are_still_@@_blocks/items" => "", "They_were_sold_@@_blocks/items_with_this_Sign" => "", "The_owner_has_earned_@@" => "", "You_set_the_amount_of_the_Sign_in_@@" => "", "Touch_on_the_Sign_that_you_want_to_know_the_information" => "", "Now_this_Sign_is_owned_by_@@" => "", "The_player_was_not_found" => "", "You_can_not_buy_in_creative" => "", "There_is_a_problem_with_the_creation_of_the_Sign" => "", "Now_this_Sign_has_the_unlimited_available" => "",  "You_earned_@@_when_you_were_offline" => "", "You_can_not_buy_from_your_Sign" => "", "The_action_has_been_executed_successfully" => "", "The_formatting_is_finished_successfully" => "", "To_format_this_information,_use_/sign_earned_format" => "", "In_total_you_have_spent_@@_with_Signs" => "", "In_total_you_have_earned_@@_with_Signs" => "", "The_command_<@@>_was_not_found!_Use_/sign_help" => ""];
+            foreach($this->mex as $var => $c){
+                $c = str_replace("_", " ", $var);
+                $this->mex[$var] = $c;
+            }                      
+        }        
+        
+        $this->setup = new Config($dataResources. "config.yml", Config::YAML, [
+                "version" => "ninety",
+                "signCreated" => "all",
+                "lastChange" => time(),
+                "dataProvider" => "YAML"            
+            ]);
+        
+        switch(strtolower($this->setup->get("dataProvider"))){
+            default:
+                $this->getLogger()->info(TextFormat::RED."The field 'dataProvider' in config.yml is incorrect!");            
+            case "yml":
+            case "yaml":
+                $this->provider = new YAMLProvider($this);
+                break;
+            case "sql":
+            case "sqlite":
+            case "sqlite3":
+                $this->provider = new SQLiteProvider($this);
+                break;
+        }
+        
+        $this->listItems = new ListItems();
+        $this->moneyManager = new MoneyManager($this);
+
+        $this->getServer()->getPluginManager()->registerEvents(new EventListener\PlayerSpawnEvent($this), $this);
+        $this->getServer()->getPluginManager()->registerEvents(new EventListener\PlayerTouchEvent($this), $this);
+        $this->getServer()->getPluginManager()->registerEvents(new EventListener\PlayerBlockBreakEvent($this), $this);
+        $this->getServer()->getPluginManager()->registerEvents(new EventListener\PlayerSignCreateEvent($this), $this);
+                            
+        $this->respawnAllSign();
+    } 
+    public function getSetup(){
+        return $this->setup;
+    }    
+    public function getProvider(){
+        return $this->provider;
+    }
+    public function getItems(){
+        return $this->listItems;
+    }
+    public function getMessages(){
+        return $this->mex;
+    }
+    public function getMoneyManager(){
+        return $this->moneyManager;
+    }
+    
+    public function isOnlinePlayer($player){
+        $player = strtolower($player);
+        foreach(Server::getInstance()->getOnlinePlayers() as $var){
+            if(strtolower($var->getDisplayName()) == $player) return true;       
+        }
+        return false;        
+    } 
+ 
+    public function getPlayer($player){
+        $player = strtolower($player);
+        if($this->isOnlinePlayer($player)){
+            return Server::getInstance()->getPlayer($player);
+        }
+        return false;     
+    }
+            
+    public function onCommand(CommandSender $sender, Command $command, $label, array $args){
+        return new \SignShop\Command\SignCommands($this, $sender, $args);
+    }
+    
+    private function spawnSign(Position $pos, $get){           
+        if($get["available"] != "unlimited" && $get["available"] - $get["amount"] <= 0)
+            $get["cost"] = "Out Of Stock";
+        else{
+            if($get["cost"] == 0) 
+                $get["cost"] = "Price: FREE";
+            else 
+                $get["cost"] = "Price: ".$get["cost"].$this->getMoneyManager()->getValue();
+        }    
+        if(!$pos->level->isChunkGenerated($pos->x, $pos->z)) $pos->level->generateChunk($pos->x, $pos->z);
+        
+        if($pos->level->getBlockIdAt($pos->x, $pos->y, $pos->z) != Item::SIGN_POST || $pos->level->getBlockIdAt($pos->x, $pos->y, $pos->z) != Item::SIGN)
+            $pos->level->setBlock($pos, Block::get(Item::SIGN_POST, $get["direction"]), false, true);
+        
+        $sign = new Sign($pos->level->getChunk($pos->x >> 4, $pos->z >> 4, true), new Compound(false, array(
+            new Int("x", $pos->x),
+            new Int("y", $pos->y),
+            new Int("z", $pos->z),
+            new String("id", Tile::SIGN),
+            new String("Text1", "[".$get["maker"]."]"),
+            new String("Text2", $this->getItems()->getName($get["id"], $get["damage"])),
+            new String("Text3", "Amount: x".$get["amount"]),
+            new String("Text4", $get["cost"])
+            )));
+        $sign->saveNBT();
+        $sign->spawnToAll();
+    }   
+    
+    public function respawnSign($var){  
+        if($this->getProvider()->existsSign($var)){
+            $g = explode(":", $var);
+            if(!isset($g[3]))
+                $g[3] = Server::getInstance()->getDefaultLevel()->getName();
+                        
+            $g[3] = str_replace("%", " ", $g[3]);
+            if(Server::getInstance()->isLevelGenerated($g[3]) == true)
+                $this->spawnSign(new Position($g[0], $g[1], $g[2], Server::getInstance()->getLevelByName($g[3])), $this->getProvider()->getSign($var));            
+        }
+    }
+    
+    public function respawnAllSign(){
+        if(count($this->getProvider()->getAllSigns()) <= 0)
+            return "There is not Signs in the worlds";
+        else{
+            foreach($this->getProvider()->getAllSigns() as $var => $c)
+                $this->respawnSign($var);                
+            return "All Signs respawned";
+        }
+    }
+    
+    public function onDisable(){
+        $this->getProvider()->onDisable();
+    }
+}<?php
+/* @author xionbig
+ * @link http://xionbig.altervista.org/SignShop 
+ * @link http://forums.pocketmine.net/plugins/signshop.668/
+ * @version 0.9.2 */
+
+namespace SignShop\Provider;
+
+use pocketmine\utils\Config;
+
+class YAMLProvider{
+    private $sign, $plr;
+    
+    public function __construct($SignShop){
+        $dataResources = $SignShop->getDataFolder()."/resources/";
+        
+        if(file_exists($dataResources. "player_authorized.yml")) rename($dataResources."player_authorized.yml", $dataResources."player.yml");
+       
+        $this->sign = new Config($dataResources. "sign.yml", Config::YAML);
+        $this->plr = new Config($dataResources. "player.yml", Config::YAML);
+        
+        if($SignShop->getSetup()->get("version") != "ninety"){
+            foreach($this->plr->getAll() as $var => $c){
+                $c["earned"] = 0; 
+                $c["totEarned"] = 0; 
+                $c["totSpent"] = 0;
+                $c["echo"] = true;
+                
+                $this->plr->set($var, array_merge($c));
+                $this->plr->save();               
+            }
+            foreach($this->sign->getAll() as $var => $c){
+                if(!isset($c["time"])) $c["time"] = time();
+                else if(!is_numeric($c["time"])) $c["time"] = time();
+                if(!isset($c["sold"])) $c["sold"] = 0;
+                if(!isset($c["earned"])) $c["earned"] = 0;       
+                if(!isset($c["direction"])) $c["direction"] = 0;
+                    
+                if(!isset($c["damage"])){
+                    $c["damage"] = $c["meta"];
+                    unset($c["meta"]);
+                }
+                $this->sign->set($var, array_merge($c));
+                $this->sign->save();
+            }        
+            foreach($this->plr->getAll() as $var => $c){
+                if($c["authorized"] == "super") $c["authorized"] = "super";
+                elseif($c["authorized"] == true) $c["authorized"] = "auth";
+                else $c["authorized"] = "unauth";
+                $this->plr->set($var, array_merge($c));
+                $this->plr->save();
+            }     
+            
+            $SignShop->getSetup()->set("version", "eighty");
+            $SignShop->getSetup()->save();   
+        }             
+    }
+            
+    public function getAllPlayers(){
+        return $this->plr->getAll();
+    }
+
+    public function existsPlayer($player){
+        return $this->plr->exists(strtolower($player));
+    }
+    
+    public function setPlayer($player, array $data){
+        $player = strtolower($player);
+
+        $this->plr->set($player, array_merge($data));    
+        $this->plr->save();
+    }
+    
+    public function getPlayer($player){
+        $player = strtolower($player);
+        if($this->plr->exists($player))
+            return $this->plr->get($player);
+        return; 
+    }  
+    
+    public function removePlayer($player){
+        $player = strtolower($player);
+        if($this->plr->exists($player)){
+            $this->plr->remove($player);
+            $this->plr->save();            
+        }
+    }
+    
+    public function getAllSigns(){
+        return $this->sign->getAll();
+    }
+    
+    public function existsSign($var){
+        return $this->sign->exists($var);
+    }
+    
+    public function setSign($var, array $data){
+        $this->sign->set($var, array_merge($data));
+        $this->sign->save();
+    }
+    
+    public function getSign($var){
+        if($this->existsSign($var)){
+            return $this->sign->get($var);
+        }
+        return;
+    }
+    
+    public function removeSign($var){
+        if($this->existsSign($var)){
+            $this->sign->remove($var);
+            $this->sign->save();
+        }
+    }
+    
+    public function onDisable(){
+        $this->sign->save();
+        $this->plr->save();
+    }
+}<?php
+/* @author xionbig
+ * @link http://xionbig.altervista.org/SignShop 
+ * @link http://forums.pocketmine.net/plugins/signshop.668/
+ * @version 0.9.2 */
+namespace SignShop;
+
+class ListItems{
+    private $items = array(
+        array("id" => 0, "damage" => 0, "name" => "Air"),
+        array("id" => 1, "damage" => 0, "name" => "Stone"),
+        array("id" => 1, "damage" => 1, "name" => "Granite"),
+        array("id" => 1, "damage" => 2, "name" => "PolishedGranite"),
+        array("id" => 1, "damage" => 3, "name" => "Diorite"),
+        array("id" => 1, "damage" => 4, "name" => "PolishedDiorite"),
+        array("id" => 1, "damage" => 5, "name" => "Andesite"),
+        array("id" => 1, "damage" => 6, "name" => "PolishedAndesite"),
+        array("id" => 2, "damage" => 0, "name" => "Grass"),
+        array("id" => 3, "damage" => 0, "name" => "Dirt"),
+        array("id" => 3, "damage" => 1, "name" => "GrasslessDirt"),
+        array("id" => 3, "damage" => 2, "name" => "Podzol"),
+        array("id" => 4, "damage" => 0, "name" => "Cobblestone"),
+        array("id" => 5, "damage" => 0, "name" => "OakPlanks"),
+        array("id" => 5, "damage" => 1, "name" => "SprucePlanks"),
+        array("id" => 5, "damage" => 2, "name" => "BirchPlanks"),
+        array("id" => 5, "damage" => 3, "name" => "JunglePlanks"),
+        array("id" => 5, "damage" => 4, "name" => "AcaciaPlanks"),
+        array("id" => 5, "damage" => 5, "name" => "DarkOakPlanks"),
+        array("id" => 6, "damage" => 0, "name" => "OakSapling"),
+        array("id" => 6, "damage" => 1, "name" => "SpruceSapling"),
+        array("id" => 6, "damage" => 2, "name" => "BirchSapling"),
+        array("id" => 6, "damage" => 3, "name" => "JungleSapling"),
+        array("id" => 6, "damage" => 4, "name" => "AcaciaSapling"),
+        array("id" => 6, "damage" => 5, "name" => "DarkOakSapling"),
+        array("id" => 7, "damage" => 0, "name" => "Bedrock"),
+        array("id" => 8, "damage" => 0, "name" => "FlowingWater"),
+        array("id" => 9, "damage" => 0, "name" => "Water"),
+        array("id" => 10, "damage" => 0, "name" => "FlowingLava"),
+        array("id" => 11, "damage" => 0, "name" => "Lava"),
+        array("id" => 12, "damage" => 0, "name" => "Sand"),
+        array("id" => 12, "damage" => 1, "name" => "RedSand"),
+        array("id" => 13, "damage" => 0, "name" => "Gravel"),
+        array("id" => 14, "damage" => 0, "name" => "GoldOre"),
+        array("id" => 15, "damage" => 0, "name" => "IronOre"),
+        array("id" => 16, "damage" => 0, "name" => "CoalOre"),
+        array("id" => 17, "damage" => 0, "name" => "OakWood"),
+        array("id" => 17, "damage" => 1, "name" => "SpruceWood"),
+        array("id" => 17, "damage" => 2, "name" => "BirchWood"),
+        array("id" => 17, "damage" => 3, "name" => "JungleWood"),
+        array("id" => 17, "damage" => 4, "name" => "OakWood"),
+        array("id" => 17, "damage" => 5, "name" => "SpruceWood"),
+        array("id" => 17, "damage" => 6, "name" => "BirchWood"),
+        array("id" => 17, "damage" => 7, "name" => "JungleWood"),
+        array("id" => 17, "damage" => 8, "name" => "OakWood"),
+        array("id" => 17, "damage" => 9, "name" => "SpruceWood"),
+        array("id" => 17, "damage" => 10, "name" => "BirchWood"),
+        array("id" => 17, "damage" => 11, "name" => "JungleWood"),
+        array("id" => 17, "damage" => 12, "name" => "OakWood"),
+        array("id" => 17, "damage" => 13, "name" => "SpruceWood"),
+        array("id" => 17, "damage" => 14, "name" => "BirchWood"),
+        array("id" => 17, "damage" => 15, "name" => "JungleWood"),
+        array("id" => 18, "damage" => 0, "name" => "OakLeaves"),
+        array("id" => 18, "damage" => 1, "name" => "SpruceLeaves"),
+        array("id" => 18, "damage" => 2, "name" => "BirchLeaves"),
+        array("id" => 18, "damage" => 3, "name" => "JungleLeaves"),
+        array("id" => 19, "damage" => 0, "name" => "Sponge"),
+        array("id" => 20, "damage" => 0, "name" => "Glass"),
+        array("id" => 21, "damage" => 0, "name" => "LapisLazuliOre"),
+        array("id" => 22, "damage" => 0, "name" => "LapisLazuliBlock"),
+        array("id" => 23, "damage" => 0, "name" => "Dispenser"),
+        array("id" => 24, "damage" => 0, "name" => "Sandstone"),
+        array("id" => 24, "damage" => 1, "name" => "ChiseledSandstone"),
+        array("id" => 24, "damage" => 2, "name" => "SmoothSandstone"),
+        array("id" => 25, "damage" => 0, "name" => "NoteBlock"),
+        array("id" => 26, "damage" => 0, "name" => "Bed"),
+        array("id" => 27, "damage" => 0, "name" => "PoweredRail"),
+        array("id" => 28, "damage" => 0, "name" => "DetectorRail"),
+        array("id" => 29, "damage" => 0, "name" => "StickyPiston"),
+        array("id" => 30, "damage" => 0, "name" => "Web"),
+        array("id" => 31, "damage" => 0, "name" => "Shrub"),
+        array("id" => 31, "damage" => 1, "name" => "Grass"),
+        array("id" => 31, "damage" => 2, "name" => "Fern"),
+        array("id" => 32, "damage" => 0, "name" => "Shrub"),
+        array("id" => 33, "damage" => 0, "name" => "Piston"),
+        array("id" => 34, "damage" => 0, "name" => "PistonHead"),
+        array("id" => 35, "damage" => 0, "name" => "Wool"),
+        array("id" => 35, "damage" => 1, "name" => "OrangeWool"),
+        array("id" => 35, "damage" => 2, "name" => "MagentaWool"),
+        array("id" => 35, "damage" => 3, "name" => "LightBlueWool"),
+        array("id" => 35, "damage" => 4, "name" => "YellowWool"),
+        array("id" => 35, "damage" => 5, "name" => "LimeWool"),
+        array("id" => 35, "damage" => 6, "name" => "PinkWool"),
+        array("id" => 35, "damage" => 7, "name" => "GrayWool"),
+        array("id" => 35, "damage" => 8, "name" => "LightGrayWool"),
+        array("id" => 35, "damage" => 9, "name" => "CyanWool"),
+        array("id" => 35, "damage" => 10, "name" => "PurpleWool"),
+        array("id" => 35, "damage" => 11, "name" => "BlueWool"),
+        array("id" => 35, "damage" => 12, "name" => "BrownWool"),
+        array("id" => 35, "damage" => 13, "name" => "GreenWool"),
+        array("id" => 35, "damage" => 14, "name" => "RedWool"),
+        array("id" => 35, "damage" => 15, "name" => "BlackWool"),
+        array("id" => 36, "damage" => 0, "name" => "PistonExtension"),
+        array("id" => 37, "damage" => 0, "name" => "Dandelion"),
+        array("id" => 38, "damage" => 0, "name" => "Poppy"),
+        array("id" => 38, "damage" => 1, "name" => "BlueOrchid"),
+        array("id" => 38, "damage" => 2, "name" => "Allium"),
+        array("id" => 38, "damage" => 3, "name" => "AzureBluet"),
+        array("id" => 38, "damage" => 4, "name" => "RedTulip"),
+        array("id" => 38, "damage" => 5, "name" => "OrangeTulip"),
+        array("id" => 38, "damage" => 6, "name" => "WhiteTulip"),
+        array("id" => 38, "damage" => 7, "name" => "PinkTulip"),
+        array("id" => 38, "damage" => 8, "name" => "OxeyeDaisy"),
+        array("id" => 39, "damage" => 0, "name" => "BrownMushroom"),
+        array("id" => 40, "damage" => 0, "name" => "RedMushroom"),
+        array("id" => 41, "damage" => 0, "name" => "GoldBlock"),
+        array("id" => 42, "damage" => 0, "name" => "IronBlock"),
+        array("id" => 43, "damage" => 0, "name" => "DoubleStoneSlab"),
+        array("id" => 43, "damage" => 1, "name" => "DoubleSandstoneSlab"),
+        array("id" => 43, "damage" => 2, "name" => "DoubleWoodenSlab"),
+        array("id" => 43, "damage" => 3, "name" => "DoubleCobblestoneSlab"),
+        array("id" => 43, "damage" => 4, "name" => "DoubleBrickSlab"),
+        array("id" => 43, "damage" => 5, "name" => "DoubleStoneBrickSlab"),
+        array("id" => 43, "damage" => 6, "name" => "DoubleNetherBrickSlab"),
+        array("id" => 43, "damage" => 7, "name" => "DoubleQuartzSlab"),
+        array("id" => 44, "damage" => 0, "name" => "StoneSlab"),
+        array("id" => 44, "damage" => 1, "name" => "SandstoneSlab"),
+        array("id" => 44, "damage" => 2, "name" => "WoodenSlab"),
+        array("id" => 44, "damage" => 3, "name" => "CobblestoneSlab"),
+        array("id" => 44, "damage" => 4, "name" => "BrickSlab"),
+        array("id" => 44, "damage" => 5, "name" => "StoneBrickSlab"),
+        array("id" => 44, "damage" => 6, "name" => "NetherBrickSlab"),
+        array("id" => 44, "damage" => 7, "name" => "QuartzSlab"),
+        array("id" => 45, "damage" => 0, "name" => "BrickBlock"),
+        array("id" => 46, "damage" => 0, "name" => "TNT"),
+        array("id" => 47, "damage" => 0, "name" => "Bookshelf"),
+        array("id" => 48, "damage" => 0, "name" => "MossyCobblestone"),
+        array("id" => 49, "damage" => 0, "name" => "Obsidian"),
+        array("id" => 50, "damage" => 0, "name" => "Torch"),
+        array("id" => 51, "damage" => 0, "name" => "Fire"),
+        array("id" => 52, "damage" => 0, "name" => "MobSpawner"),
+        array("id" => 53, "damage" => 0, "name" => "OakStairs"),
+        array("id" => 54, "damage" => 0, "name" => "Chest"),
+        array("id" => 55, "damage" => 0, "name" => "RedstoneWire"),
+        array("id" => 56, "damage" => 0, "name" => "DiamondOre"),
+        array("id" => 57, "damage" => 0, "name" => "DiamondBlock"),
+        array("id" => 58, "damage" => 0, "name" => "CraftingTable"),
+        array("id" => 59, "damage" => 0, "name" => "Wheat"),
+        array("id" => 60, "damage" => 0, "name" => "Farmland"),
+        array("id" => 61, "damage" => 0, "name" => "Furnace"),
+        array("id" => 62, "damage" => 0, "name" => "LitFurnace"),
+        array("id" => 63, "damage" => 0, "name" => "StandingSign"),
+        array("id" => 64, "damage" => 0, "name" => "WoodenDoor"),
+        array("id" => 65, "damage" => 0, "name" => "Ladder"),
+        array("id" => 66, "damage" => 0, "name" => "Rail"),
+        array("id" => 67, "damage" => 0, "name" => "CobblestoneStairs"),
+        array("id" => 68, "damage" => 0, "name" => "WallSign"),
+        array("id" => 69, "damage" => 0, "name" => "Lever"),
+        array("id" => 70, "damage" => 0, "name" => "StonePressurePlate"),
+        array("id" => 71, "damage" => 0, "name" => "IronDoor"),
+        array("id" => 72, "damage" => 0, "name" => "WoodenPressurePlate"),
+        array("id" => 73, "damage" => 0, "name" => "RedstoneOre"),
+        array("id" => 74, "damage" => 0, "name" => "LitRedstoneOre"),
+        array("id" => 75, "damage" => 0, "name" => "UnlitRedstoneTorch"),
+        array("id" => 76, "damage" => 0, "name" => "RedstoneTorch"),
+        array("id" => 77, "damage" => 0, "name" => "StoneButton"),
+        array("id" => 78, "damage" => 0, "name" => "SnowLayer"),
+        array("id" => 79, "damage" => 0, "name" => "Ice"),
+        array("id" => 80, "damage" => 0, "name" => "Snow"),
+        array("id" => 81, "damage" => 0, "name" => "Cactus"),
+        array("id" => 82, "damage" => 0, "name" => "Clay"),
+        array("id" => 83, "damage" => 0, "name" => "SugarCane"),
+        array("id" => 84, "damage" => 0, "name" => "Jukebox"),
+        array("id" => 85, "damage" => 0, "name" => "Fence"),
+        array("id" => 86, "damage" => 0, "name" => "Pumpkin"),
+        array("id" => 87, "damage" => 0, "name" => "Netherrack"),
+        array("id" => 88, "damage" => 0, "name" => "SoulSand"),
+        array("id" => 89, "damage" => 0, "name" => "Glowstone"),
+        array("id" => 90, "damage" => 0, "name" => "Portal"),
+        array("id" => 91, "damage" => 0, "name" => "Jack-o-lantern"),
+        array("id" => 92, "damage" => 0, "name" => "Cake"),
+        array("id" => 93, "damage" => 0, "name" => "UnpoweredRepeater"),
+        array("id" => 94, "damage" => 0, "name" => "PoweredRepeater"),
+        array("id" => 95, "damage" => 0, "name" => "WhiteStainedGlass"),
+        array("id" => 95, "damage" => 1, "name" => "OrangeStainedGlass"),
+        array("id" => 95, "damage" => 2, "name" => "MagentaStainedGlass"),
+        array("id" => 95, "damage" => 3, "name" => "LightBlueStainedGlass"),
+        array("id" => 95, "damage" => 4, "name" => "YellowStainedGlass"),
+        array("id" => 95, "damage" => 5, "name" => "LimeStainedGlass"),
+        array("id" => 95, "damage" => 6, "name" => "PinkStainedGlass"),
+        array("id" => 95, "damage" => 7, "name" => "GrayStainedGlass"),
+        array("id" => 95, "damage" => 8, "name" => "LightGrayStainedGlass"),
+        array("id" => 95, "damage" => 9, "name" => "CyanStainedGlass"),
+        array("id" => 95, "damage" => 10, "name" => "PurpleStainedGlass"),
+        array("id" => 95, "damage" => 11, "name" => "BlueStainedGlass"),
+        array("id" => 95, "damage" => 12, "name" => "BrownStainedGlass"),
+        array("id" => 95, "damage" => 13, "name" => "GreenStainedGlass"),
+        array("id" => 95, "damage" => 14, "name" => "RedStainedGlass"),
+        array("id" => 95, "damage" => 15, "name" => "BlackStainedGlass"),
+        array("id" => 96, "damage" => 0, "name" => "Trapdoor"),
+        array("id" => 97, "damage" => 0, "name" => "StoneMonsterEgg"),
+        array("id" => 97, "damage" => 1, "name" => "CobblestoneMonsterEgg"),
+        array("id" => 97, "damage" => 2, "name" => "StoneBrickMonsterEgg"),
+        array("id" => 97, "damage" => 3, "name" => "MossyStoneBrickMonsterEgg"),
+        array("id" => 97, "damage" => 4, "name" => "CrackedStoneBrickMonsterEgg"),
+        array("id" => 97, "damage" => 5, "name" => "ChiseledStoneBrickMonsterEgg"),
+        array("id" => 98, "damage" => 0, "name" => "StoneBrick"),
+        array("id" => 98, "damage" => 1, "name" => "MossyStoneBrick"),
+        array("id" => 98, "damage" => 2, "name" => "CrackedStoneBrick"),
+        array("id" => 98, "damage" => 3, "name" => "ChiseledStoneBrick"),
+        array("id" => 99, "damage" => 0, "name" => "RedMushroomBlock"),
+        array("id" => 100, "damage" => 0, "name" => "BrownMushroomBlock"),
+        array("id" => 101, "damage" => 0, "name" => "IronBars"),
+        array("id" => 102, "damage" => 0, "name" => "GlassPane"),
+        array("id" => 103, "damage" => 0, "name" => "MelonBlock"),
+        array("id" => 104, "damage" => 0, "name" => "PumpkinStem"),
+        array("id" => 105, "damage" => 0, "name" => "MelonStem"),
+        array("id" => 106, "damage" => 0, "name" => "Vines"),
+        array("id" => 107, "damage" => 0, "name" => "FenceGate"),
+        array("id" => 108, "damage" => 0, "name" => "BrickStairs"),
+        array("id" => 109, "damage" => 0, "name" => "StoneBrickStairs"),
+        array("id" => 110, "damage" => 0, "name" => "Mycelium"),
+        array("id" => 111, "damage" => 0, "name" => "LilyPad"),
+        array("id" => 112, "damage" => 0, "name" => "NetherBrick"),
+        array("id" => 113, "damage" => 0, "name" => "NetherBrickFence"),
+        array("id" => 114, "damage" => 0, "name" => "NetherBrickStairs"),
+        array("id" => 115, "damage" => 0, "name" => "NetherWart"),
+        array("id" => 116, "damage" => 0, "name" => "EnchantmentTable"),
+        array("id" => 117, "damage" => 0, "name" => "BrewingStand"),
+        array("id" => 118, "damage" => 0, "name" => "Cauldron"),
+        array("id" => 119, "damage" => 0, "name" => "EndPortal"),
+        array("id" => 120, "damage" => 0, "name" => "EndPortalFrame"),
+        array("id" => 121, "damage" => 0, "name" => "EndStone"),
+        array("id" => 122, "damage" => 0, "name" => "DragonEgg"),
+        array("id" => 123, "damage" => 0, "name" => "RedstoneLamp"),
+        array("id" => 124, "damage" => 0, "name" => "LitRedstoneLamp"),
+        array("id" => 125, "damage" => 0, "name" => "DoubleOakSlab"),
+        array("id" => 125, "damage" => 1, "name" => "DoubleSpruceSlab"),
+        array("id" => 125, "damage" => 2, "name" => "DoubleBirchSlab"),
+        array("id" => 125, "damage" => 3, "name" => "DoubleJungleSlab"),
+        array("id" => 125, "damage" => 4, "name" => "DoubleAcaciaSlab"),
+        array("id" => 125, "damage" => 5, "name" => "DoubleDarkOakSlab"),
+        array("id" => 126, "damage" => 0, "name" => "OakSlab"),
+        array("id" => 126, "damage" => 1, "name" => "SpruceSlab"),
+        array("id" => 126, "damage" => 2, "name" => "BirchSlab"),
+        array("id" => 126, "damage" => 3, "name" => "JungleSlab"),
+        array("id" => 126, "damage" => 4, "name" => "AcaciaSlab"),
+        array("id" => 126, "damage" => 5, "name" => "DarkOakSlab"),
+        array("id" => 127, "damage" => 0, "name" => "Cocoa"),
+        array("id" => 128, "damage" => 0, "name" => "SandstoneStairs"),
+        array("id" => 129, "damage" => 0, "name" => "EmeraldOre"),
+        array("id" => 130, "damage" => 0, "name" => "EnderChest"),
+        array("id" => 131, "damage" => 0, "name" => "TripwireHook"),
+        array("id" => 132, "damage" => 0, "name" => "Tripwire"),
+        array("id" => 133, "damage" => 0, "name" => "EmeraldBlock"),
+        array("id" => 134, "damage" => 0, "name" => "SpruceStairs"),
+        array("id" => 135, "damage" => 0, "name" => "BirchStairs"),
+        array("id" => 136, "damage" => 0, "name" => "JungleStairs"),
+        array("id" => 137, "damage" => 0, "name" => "CommandBlock"),
+        array("id" => 138, "damage" => 0, "name" => "Beacon"),
+        array("id" => 139, "damage" => 0, "name" => "CobblestoneWall"),
+        array("id" => 140, "damage" => 0, "name" => "FlowerPot"),
+        array("id" => 141, "damage" => 0, "name" => "Carrots"),
+        array("id" => 142, "damage" => 0, "name" => "Potatoes"),
+        array("id" => 143, "damage" => 0, "name" => "WoodenButton"),
+        array("id" => 144, "damage" => 0, "name" => "Skull"),
+        array("id" => 145, "damage" => 0, "name" => "Anvil"),
+        array("id" => 146, "damage" => 0, "name" => "TrappedChest"),
+        array("id" => 147, "damage" => 0, "name" => "LightWeightedPressurePlate"),
+        array("id" => 148, "damage" => 0, "name" => "HeavyWeightedPressurePlate"),
+        array("id" => 149, "damage" => 0, "name" => "UnpoweredRedstoneComparator"),
+        array("id" => 150, "damage" => 0, "name" => "PoweredRedstoneComparator"),
+        array("id" => 151, "damage" => 0, "name" => "DaylightDetector"),
+        array("id" => 152, "damage" => 0, "name" => "RedstoneBlock"),
+        array("id" => 153, "damage" => 0, "name" => "NetherQuartzOre"),
+        array("id" => 154, "damage" => 0, "name" => "Hopper"),
+        array("id" => 155, "damage" => 0, "name" => "QuartzBlock"),
+        array("id" => 155, "damage" => 1, "name" => "ChiseledQuartzBlock"),
+        array("id" => 155, "damage" => 2, "name" => "PillarQuartzBlock"),
+        array("id" => 156, "damage" => 0, "name" => "QuartzStairs"),
+        array("id" => 157, "damage" => 0, "name" => "ActivatorRail"),
+        array("id" => 158, "damage" => 0, "name" => "Dropper"),
+        array("id" => 159, "damage" => 0, "name" => "WhiteStainedClay"),
+        array("id" => 159, "damage" => 1, "name" => "OrangeStainedClay"),
+        array("id" => 159, "damage" => 2, "name" => "MagentaStainedClay"),
+        array("id" => 159, "damage" => 3, "name" => "LightBlueStainedClay"),
+        array("id" => 159, "damage" => 4, "name" => "YellowStainedClay"),
+        array("id" => 159, "damage" => 5, "name" => "LimeStainedClay"),
+        array("id" => 159, "damage" => 6, "name" => "PinkStainedClay"),
+        array("id" => 159, "damage" => 7, "name" => "GrayStainedClay"),
+        array("id" => 159, "damage" => 8, "name" => "LightGrayStainedClay"),
+        array("id" => 159, "damage" => 9, "name" => "CyanStainedClay"),
+        array("id" => 159, "damage" => 10, "name" => "PurpleStainedClay"),
+        array("id" => 159, "damage" => 11, "name" => "BlueStainedClay"),
+        array("id" => 159, "damage" => 12, "name" => "BrownStainedClay"),
+        array("id" => 159, "damage" => 13, "name" => "GreenStainedClay"),
+        array("id" => 159, "damage" => 14, "name" => "RedStainedClay"),
+        array("id" => 159, "damage" => 15, "name" => "BlackStainedClay"),
+        array("id" => 160, "damage" => 0, "name" => "WhiteStainedGlassPane"),
+        array("id" => 160, "damage" => 1, "name" => "OrangeStainedGlassPane"),
+        array("id" => 160, "damage" => 2, "name" => "MagentaStainedGlassPane"),
+        array("id" => 160, "damage" => 3, "name" => "LightBlueStainedGlassPane"),
+        array("id" => 160, "damage" => 4, "name" => "YellowStainedGlassPane"),
+        array("id" => 160, "damage" => 5, "name" => "LimeStainedGlassPane"),
+        array("id" => 160, "damage" => 6, "name" => "PinkStainedGlassPane"),
+        array("id" => 160, "damage" => 7, "name" => "GrayStainedGlassPane"),
+        array("id" => 160, "damage" => 8, "name" => "LightGrayStainedGlassPane"),
+        array("id" => 160, "damage" => 9, "name" => "CyanStainedGlassPane"),
+        array("id" => 160, "damage" => 10, "name" => "PurpleStainedGlassPane"),
+        array("id" => 160, "damage" => 11, "name" => "BlueStainedGlassPane"),
+        array("id" => 160, "damage" => 12, "name" => "BrownStainedGlassPane"),
+        array("id" => 160, "damage" => 13, "name" => "GreenStainedGlassPane"),
+        array("id" => 160, "damage" => 14, "name" => "RedStainedGlassPane"),
+        array("id" => 160, "damage" => 15, "name" => "BlackStainedGlassPane"),
+        array("id" => 161, "damage" => 0, "name" => "AcaciaLeaves"),
+        array("id" => 161, "damage" => 1, "name" => "DarkOakLeaves"),
+        array("id" => 162, "damage" => 0, "name" => "AcaciaWood"),
+        array("id" => 162, "damage" => 1, "name" => "DarkOakWood"),
+        array("id" => 162, "damage" => 2, "name" => "AcaciaWood"),
+        array("id" => 162, "damage" => 3, "name" => "DarkOakWood"),
+        array("id" => 162, "damage" => 4, "name" => "AcaciaWood"),
+        array("id" => 162, "damage" => 5, "name" => "DarkOakWood"),
+        array("id" => 162, "damage" => 6, "name" => "AcaciaWood"),
+        array("id" => 162, "damage" => 7, "name" => "DarkOakWood"),
+        array("id" => 162, "damage" => 8, "name" => "AcaciaWood"),
+        array("id" => 162, "damage" => 9, "name" => "DarkOakWood"),
+        array("id" => 162, "damage" => 10, "name" => "AcaciaWood"),
+        array("id" => 162, "damage" => 11, "name" => "DarkOakWood"),
+        array("id" => 162, "damage" => 12, "name" => "AcaciaWood"),
+        array("id" => 162, "damage" => 13, "name" => "DarkOakWood"),
+        array("id" => 162, "damage" => 14, "name" => "AcaciaWood"),
+        array("id" => 162, "damage" => 15, "name" => "DarkOakWood"),
+        array("id" => 163, "damage" => 0, "name" => "AcaciaWoodStairs"),
+        array("id" => 164, "damage" => 0, "name" => "DarkOakWoodStairs"),
+        array("id" => 165, "damage" => 0, "name" => "SlimeBlock"),
+        array("id" => 166, "damage" => 0, "name" => "Barrier"),
+        array("id" => 167, "damage" => 0, "name" => "IronTrapdoor"),
+        array("id" => 170, "damage" => 0, "name" => "HayBale"),
+        array("id" => 171, "damage" => 0, "name" => "WhiteCarpet"),
+        array("id" => 171, "damage" => 1, "name" => "OrangeCarpet"),
+        array("id" => 171, "damage" => 2, "name" => "MagentaCarpet"),
+        array("id" => 171, "damage" => 3, "name" => "LightBlueCarpet"),
+        array("id" => 171, "damage" => 4, "name" => "YellowCarpet"),
+        array("id" => 171, "damage" => 5, "name" => "LimeCarpet"),
+        array("id" => 171, "damage" => 6, "name" => "PinkCarpet"),
+        array("id" => 171, "damage" => 7, "name" => "GrayCarpet"),
+        array("id" => 171, "damage" => 8, "name" => "LightGrayCarpet"),
+        array("id" => 171, "damage" => 9, "name" => "CyanCarpet"),
+        array("id" => 171, "damage" => 10, "name" => "PurpleCarpet"),
+        array("id" => 171, "damage" => 11, "name" => "BlueCarpet"),
+        array("id" => 171, "damage" => 12, "name" => "BrownCarpet"),
+        array("id" => 171, "damage" => 13, "name" => "GreenCarpet"),
+        array("id" => 171, "damage" => 14, "name" => "RedCarpet"),
+        array("id" => 171, "damage" => 15, "name" => "BlackCarpet"),
+        array("id" => 172, "damage" => 0, "name" => "HardenedClay"),
+        array("id" => 173, "damage" => 0, "name" => "CoalBlock"),
+        array("id" => 174, "damage" => 0, "name" => "PackedIce"),
+        array("id" => 175, "damage" => 0, "name" => "Sunflower"),
+        array("id" => 175, "damage" => 1, "name" => "Lilac"),
+        array("id" => 175, "damage" => 2, "name" => "DoubleTallgrass"),
+        array("id" => 175, "damage" => 3, "name" => "LargeFern"),
+        array("id" => 175, "damage" => 4, "name" => "RoseBush"),
+        array("id" => 175, "damage" => 5, "name" => "Peony"),
+        array("id" => 256, "damage" => 0, "name" => "IronShovel"),
+        array("id" => 257, "damage" => 0, "name" => "IronPickaxe"),
+        array("id" => 258, "damage" => 0, "name" => "IronAxe"),
+        array("id" => 259, "damage" => 0, "name" => "FlintAndSteel"),
+        array("id" => 260, "damage" => 0, "name" => "Apple"),
+        array("id" => 261, "damage" => 0, "name" => "Bow"),
+        array("id" => 262, "damage" => 0, "name" => "Arrow"),
+        array("id" => 263, "damage" => 0, "name" => "Coal"),
+        array("id" => 263, "damage" => 1, "name" => "Charcoal"),
+        array("id" => 264, "damage" => 0, "name" => "Diamond"),
+        array("id" => 265, "damage" => 0, "name" => "IronIngot"),
+        array("id" => 266, "damage" => 0, "name" => "GoldIngot"),
+        array("id" => 267, "damage" => 0, "name" => "IronSword"),
+        array("id" => 268, "damage" => 0, "name" => "WoodenSword"),
+        array("id" => 269, "damage" => 0, "name" => "WoodenShovel"),
+        array("id" => 270, "damage" => 0, "name" => "WoodenPickaxe"),
+        array("id" => 271, "damage" => 0, "name" => "WoodenAxe"),
+        array("id" => 272, "damage" => 0, "name" => "StoneSword"),
+        array("id" => 273, "damage" => 0, "name" => "StoneShovel"),
+        array("id" => 274, "damage" => 0, "name" => "StonePickaxe"),
+        array("id" => 275, "damage" => 0, "name" => "StoneAxe"),
+        array("id" => 276, "damage" => 0, "name" => "DiamondSword"),
+        array("id" => 277, "damage" => 0, "name" => "DiamondShovel"),
+        array("id" => 278, "damage" => 0, "name" => "DiamondPickaxe"),
+        array("id" => 279, "damage" => 0, "name" => "DiamondAxe"),
+        array("id" => 280, "damage" => 0, "name" => "Stick"),
+        array("id" => 281, "damage" => 0, "name" => "Bowl"),
+        array("id" => 282, "damage" => 0, "name" => "MushroomSoup"),
+        array("id" => 283, "damage" => 0, "name" => "GoldSword"),
+        array("id" => 284, "damage" => 0, "name" => "GoldShovel"),
+        array("id" => 285, "damage" => 0, "name" => "GoldPickaxe"),
+        array("id" => 286, "damage" => 0, "name" => "GoldAxe"),
+        array("id" => 287, "damage" => 0, "name" => "String"),
+        array("id" => 288, "damage" => 0, "name" => "Feather"),
+        array("id" => 289, "damage" => 0, "name" => "Sulphur"),
+        array("id" => 290, "damage" => 0, "name" => "WoodenHoe"),
+        array("id" => 291, "damage" => 0, "name" => "StoneHoe"),
+        array("id" => 292, "damage" => 0, "name" => "IronHoe"),
+        array("id" => 293, "damage" => 0, "name" => "DiamondHoe"),
+        array("id" => 294, "damage" => 0, "name" => "GoldHoe"),
+        array("id" => 295, "damage" => 0, "name" => "WheatSeeds"),
+        array("id" => 296, "damage" => 0, "name" => "Wheat"),
+        array("id" => 297, "damage" => 0, "name" => "Bread"),
+        array("id" => 298, "damage" => 0, "name" => "LeatherHelmet"),
+        array("id" => 299, "damage" => 0, "name" => "LeatherChestplate"),
+        array("id" => 300, "damage" => 0, "name" => "LeatherLeggings"),
+        array("id" => 301, "damage" => 0, "name" => "LeatherBoots"),
+        array("id" => 302, "damage" => 0, "name" => "ChainmailHelmet"),
+        array("id" => 303, "damage" => 0, "name" => "ChainmailChestplate"),
+        array("id" => 304, "damage" => 0, "name" => "ChainmailLeggings"),
+        array("id" => 305, "damage" => 0, "name" => "ChainmailBoots"),
+        array("id" => 306, "damage" => 0, "name" => "IronHelmet"),
+        array("id" => 307, "damage" => 0, "name" => "IronChestplate"),
+        array("id" => 308, "damage" => 0, "name" => "IronLeggings"),
+        array("id" => 309, "damage" => 0, "name" => "IronBoots"),
+        array("id" => 310, "damage" => 0, "name" => "DiamondHelmet"),
+        array("id" => 311, "damage" => 0, "name" => "DiamondChestplate"),
+        array("id" => 312, "damage" => 0, "name" => "DiamondLeggings"),
+        array("id" => 313, "damage" => 0, "name" => "DiamondBoots"),
+        array("id" => 314, "damage" => 0, "name" => "GoldHelmet"),
+        array("id" => 315, "damage" => 0, "name" => "GoldChestplate"),
+        array("id" => 316, "damage" => 0, "name" => "GoldLeggings"),
+        array("id" => 317, "damage" => 0, "name" => "GoldBoots"),
+        array("id" => 318, "damage" => 0, "name" => "Flint"),
+        array("id" => 319, "damage" => 0, "name" => "RawPorkchop"),
+        array("id" => 320, "damage" => 0, "name" => "CookedPorkchop"),
+        array("id" => 321, "damage" => 0, "name" => "Painting"),
+        array("id" => 322, "damage" => 0, "name" => "GoldenApple"),
+        array("id" => 322, "damage" => 1, "name" => "EnchantedGoldenApple"),
+        array("id" => 323, "damage" => 0, "name" => "Sign"),
+        array("id" => 324, "damage" => 0, "name" => "WoodenDoor"),
+        array("id" => 325, "damage" => 0, "name" => "Bucket"),
+        array("id" => 326, "damage" => 0, "name" => "WaterBucket"),
+        array("id" => 327, "damage" => 0, "name" => "LavaBucket"),
+        array("id" => 328, "damage" => 0, "name" => "Minecart"),
+        array("id" => 329, "damage" => 0, "name" => "Saddle"),
+        array("id" => 330, "damage" => 0, "name" => "IronDoor"),
+        array("id" => 331, "damage" => 0, "name" => "Redstone"),
+        array("id" => 332, "damage" => 0, "name" => "Snowball"),
+        array("id" => 333, "damage" => 0, "name" => "Boat"),
+        array("id" => 334, "damage" => 0, "name" => "Leather"),
+        array("id" => 335, "damage" => 0, "name" => "MilkBucket"),
+        array("id" => 336, "damage" => 0, "name" => "ClayBrick"),
+        array("id" => 337, "damage" => 0, "name" => "ClayBalls"),
+        array("id" => 338, "damage" => 0, "name" => "Sugarcane"),
+        array("id" => 339, "damage" => 0, "name" => "Paper"),
+        array("id" => 340, "damage" => 0, "name" => "Book"),
+        array("id" => 341, "damage" => 0, "name" => "Slimeball"),
+        array("id" => 342, "damage" => 0, "name" => "StorageMinecart"),
+        array("id" => 343, "damage" => 0, "name" => "PoweredMinecart"),
+        array("id" => 344, "damage" => 0, "name" => "Egg"),
+        array("id" => 345, "damage" => 0, "name" => "Compass"),
+        array("id" => 346, "damage" => 0, "name" => "FishingRod"),
+        array("id" => 347, "damage" => 0, "name" => "Clock"),
+        array("id" => 348, "damage" => 0, "name" => "GlowstoneDust"),
+        array("id" => 349, "damage" => 0, "name" => "RawFish"),
+        array("id" => 349, "damage" => 1, "name" => "RawSalmon"),
+        array("id" => 349, "damage" => 2, "name" => "Clownfish"),
+        array("id" => 349, "damage" => 3, "name" => "Pufferfish"),
+        array("id" => 350, "damage" => 0, "name" => "CookedFish"),
+        array("id" => 350, "damage" => 1, "name" => "CookedSalmon"),
+        array("id" => 351, "damage" => 0, "name" => "InkSack"),
+        array("id" => 351, "damage" => 1, "name" => "RoseRed"),
+        array("id" => 351, "damage" => 2, "name" => "CactusGreen"),
+        array("id" => 351, "damage" => 3, "name" => "CocoBeans"),
+        array("id" => 351, "damage" => 4, "name" => "LapisLazuli"),
+        array("id" => 351, "damage" => 5, "name" => "PurpleDye"),
+        array("id" => 351, "damage" => 6, "name" => "CyanDye"),
+        array("id" => 351, "damage" => 7, "name" => "LightGrayDye"),
+        array("id" => 351, "damage" => 8, "name" => "GrayDye"),
+        array("id" => 351, "damage" => 9, "name" => "PinkDye"),
+        array("id" => 351, "damage" => 10, "name" => "LimeDye"),
+        array("id" => 351, "damage" => 11, "name" => "DandelionYellow"),
+        array("id" => 351, "damage" => 12, "name" => "LightBlueDye"),
+        array("id" => 351, "damage" => 13, "name" => "MagentaDye"),
+        array("id" => 351, "damage" => 14, "name" => "OrangeDye"),
+        array("id" => 351, "damage" => 15, "name" => "BoneMeal"),
+        array("id" => 352, "damage" => 0, "name" => "Bone"),
+        array("id" => 353, "damage" => 0, "name" => "Sugar"),
+        array("id" => 354, "damage" => 0, "name" => "Cake"),
+        array("id" => 355, "damage" => 0, "name" => "Bed"),
+        array("id" => 356, "damage" => 0, "name" => "RedstoneRepeater"),
+        array("id" => 357, "damage" => 0, "name" => "Cookie"),
+        array("id" => 358, "damage" => 0, "name" => "Map"),
+        array("id" => 359, "damage" => 0, "name" => "Shears"),
+        array("id" => 360, "damage" => 0, "name" => "Melon"),
+        array("id" => 361, "damage" => 0, "name" => "PumpkinSeeds"),
+        array("id" => 362, "damage" => 0, "name" => "MelonSeeds"),
+        array("id" => 363, "damage" => 0, "name" => "RawBeef"),
+        array("id" => 364, "damage" => 0, "name" => "Steak"),
+        array("id" => 365, "damage" => 0, "name" => "RawChicken"),
+        array("id" => 366, "damage" => 0, "name" => "CookedChicken"),
+        array("id" => 367, "damage" => 0, "name" => "RottenFlesh"),
+        array("id" => 368, "damage" => 0, "name" => "EnderPearl"),
+        array("id" => 369, "damage" => 0, "name" => "BlazeRod"),
+        array("id" => 370, "damage" => 0, "name" => "GhastTear"),
+        array("id" => 371, "damage" => 0, "name" => "GoldNugget"),
+        array("id" => 372, "damage" => 0, "name" => "NetherWartSeeds"),
+        array("id" => 373, "damage" => 0, "name" => "Potion"),
+        array("id" => 373, "damage" => 16, "name" => "AwkwardPotion"),
+        array("id" => 373, "damage" => 32, "name" => "ThickPotion"),
+        array("id" => 373, "damage" => 64, "name" => "MundanePotion"),
+        array("id" => 373, "damage" => 8193, "name" => "RegenerationPotion"),
+        array("id" => 373, "damage" => 8194, "name" => "SwiftnessPotion"),
+        array("id" => 373, "damage" => 8195, "name" => "FireResistancePotion)"),
+        array("id" => 373, "damage" => 8196, "name" => "PoisonPotion"),
+        array("id" => 373, "damage" => 8197, "name" => "HealingPotion"),
+        array("id" => 373, "damage" => 8200, "name" => "WeaknessPotion"),
+        array("id" => 373, "damage" => 8201, "name" => "StrengthPotion"),
+        array("id" => 373, "damage" => 8202, "name" => "SlownessPotion"),
+        array("id" => 373, "damage" => 8204, "name" => "HarmingPotion"),
+        array("id" => 373, "damage" => 8225, "name" => "RegenerationPotionIi"),
+        array("id" => 373, "damage" => 8226, "name" => "SwiftnessPotionIi"),
+        array("id" => 373, "damage" => 8228, "name" => "PoisonPotionIi"),
+        array("id" => 373, "damage" => 8229, "name" => "HealingPotionIi"),
+        array("id" => 373, "damage" => 8233, "name" => "StrengthPotionIi"),
+        array("id" => 373, "damage" => 8236, "name" => "HarmingPotionIi"),
+        array("id" => 373, "damage" => 8257, "name" => "RegenerationPotion"),
+        array("id" => 373, "damage" => 8258, "name" => "SwiftnessPotion"),
+        array("id" => 373, "damage" => 8259, "name" => "FireResistancePotion"),
+        array("id" => 373, "damage" => 8260, "name" => "PoisonPotion"),
+        array("id" => 373, "damage" => 8264, "name" => "WeaknessPotion"),
+        array("id" => 373, "damage" => 8265, "name" => "StrengthPotion"),
+        array("id" => 373, "damage" => 8266, "name" => "SlownessPotion"),
+        array("id" => 373, "damage" => 16378, "name" => "FireResistanceSplash"),
+        array("id" => 373, "damage" => 16385, "name" => "RegenerationSplash"),
+        array("id" => 373, "damage" => 16386, "name" => "SwiftnessSplash"),
+        array("id" => 373, "damage" => 16388, "name" => "PoisonSplash"),
+        array("id" => 373, "damage" => 16389, "name" => "HealingSplash"),
+        array("id" => 373, "damage" => 16392, "name" => "WeaknessSplash"),
+        array("id" => 373, "damage" => 16393, "name" => "StrengthSplash"),
+        array("id" => 373, "damage" => 16394, "name" => "SlownessSplash"),
+        array("id" => 373, "damage" => 16396, "name" => "HarmingSplash"),
+        array("id" => 373, "damage" => 16418, "name" => "SwiftnessSplashIi"),
+        array("id" => 373, "damage" => 16420, "name" => "PoisonSplashIi"),
+        array("id" => 373, "damage" => 16421, "name" => "HealingSplashIi"),
+        array("id" => 373, "damage" => 16425, "name" => "StrengthSplashIi"),
+        array("id" => 373, "damage" => 16428, "name" => "HarmingSplashIi"),
+        array("id" => 373, "damage" => 16449, "name" => "RegenerationSplash"),
+        array("id" => 373, "damage" => 16450, "name" => "SwiftnessSplash"),
+        array("id" => 373, "damage" => 16451, "name" => "FireResistanceSplash"),
+        array("id" => 373, "damage" => 16452, "name" => "PoisonSplash"),
+        array("id" => 373, "damage" => 16456, "name" => "WeaknessSplash"),
+        array("id" => 373, "damage" => 16457, "name" => "StrengthSplash"),
+        array("id" => 373, "damage" => 16458, "name" => "SlownessSplash"),
+        array("id" => 373, "damage" => 16471, "name" => "RegenerationSplashIi"),
+        array("id" => 374, "damage" => 0, "name" => "GlassBottle"),
+        array("id" => 375, "damage" => 0, "name" => "SpiderEye"),
+        array("id" => 376, "damage" => 0, "name" => "FermentedSpiderEye"),
+        array("id" => 377, "damage" => 0, "name" => "BlazePowder"),
+        array("id" => 378, "damage" => 0, "name" => "MagmaCream"),
+        array("id" => 379, "damage" => 0, "name" => "BrewingStand"),
+        array("id" => 380, "damage" => 0, "name" => "Cauldron"),
+        array("id" => 381, "damage" => 0, "name" => "EyeOfEnder"),
+        array("id" => 382, "damage" => 0, "name" => "GlisteringMelon"),
+        array("id" => 383, "damage" => 50, "name" => "SpawnCreeper"),
+        array("id" => 383, "damage" => 51, "name" => "SpawnSkeleton"),
+        array("id" => 383, "damage" => 52, "name" => "SpawnSpider"),
+        array("id" => 383, "damage" => 54, "name" => "SpawnZombie"),
+        array("id" => 383, "damage" => 55, "name" => "SpawnSlime"),
+        array("id" => 383, "damage" => 56, "name" => "SpawnGhast"),
+        array("id" => 383, "damage" => 57, "name" => "SpawnPigman"),
+        array("id" => 383, "damage" => 58, "name" => "SpawnEnderman"),
+        array("id" => 383, "damage" => 59, "name" => "SpawnCaveSpider"),
+        array("id" => 383, "damage" => 60, "name" => "SpawnSilverfish"),
+        array("id" => 383, "damage" => 61, "name" => "SpawnBlaze"),
+        array("id" => 383, "damage" => 62, "name" => "SpawnMagmaCube"),
+        array("id" => 383, "damage" => 65, "name" => "SpawnBat"),
+        array("id" => 383, "damage" => 66, "name" => "SpawnWitch"),
+        array("id" => 383, "damage" => 90, "name" => "SpawnPig"),
+        array("id" => 383, "damage" => 91, "name" => "SpawnSheep"),
+        array("id" => 383, "damage" => 92, "name" => "SpawnCow"),
+        array("id" => 383, "damage" => 93, "name" => "SpawnChicken"),
+        array("id" => 383, "damage" => 94, "name" => "SpawnSquid"),
+        array("id" => 383, "damage" => 95, "name" => "SpawnWolf"),
+        array("id" => 383, "damage" => 96, "name" => "SpawnMooshroom"),
+        array("id" => 383, "damage" => 98, "name" => "SpawnOcelot"),
+        array("id" => 383, "damage" => 100, "name" => "SpawnHorse"),
+        array("id" => 383, "damage" => 120, "name" => "SpawnVillager"),
+        array("id" => 384, "damage" => 0, "name" => "BottleO'Enchanting"),
+        array("id" => 385, "damage" => 0, "name" => "FireCharge"),
+        array("id" => 386, "damage" => 0, "name" => "BookAndQuill"),
+        array("id" => 387, "damage" => 0, "name" => "WrittenBook"),
+        array("id" => 388, "damage" => 0, "name" => "Emerald"),
+        array("id" => 389, "damage" => 0, "name" => "ItemFrame"),
+        array("id" => 390, "damage" => 0, "name" => "FlowerPot"),
+        array("id" => 391, "damage" => 0, "name" => "Carrot"),
+        array("id" => 392, "damage" => 0, "name" => "Potato"),
+        array("id" => 393, "damage" => 0, "name" => "BakedPotato"),
+        array("id" => 394, "damage" => 0, "name" => "PoisonousPotato"),
+        array("id" => 395, "damage" => 0, "name" => "Map"),
+        array("id" => 396, "damage" => 0, "name" => "GoldenCarrot"),
+        array("id" => 397, "damage" => 0, "name" => "MobHead(skeleton)"),
+        array("id" => 397, "damage" => 1, "name" => "MobHead(witherSkeleton)"),
+        array("id" => 397, "damage" => 2, "name" => "MobHead(zombie)"),
+        array("id" => 397, "damage" => 3, "name" => "MobHead(human)"),
+        array("id" => 397, "damage" => 4, "name" => "MobHead(creeper)"),
+        array("id" => 398, "damage" => 0, "name" => "CarrotOnAStick"),
+        array("id" => 399, "damage" => 0, "name" => "NetherStar"),
+        array("id" => 400, "damage" => 0, "name" => "PumpkinPie"),
+        array("id" => 401, "damage" => 0, "name" => "FireworkRocket"),
+        array("id" => 402, "damage" => 0, "name" => "FireworkStar"),
+        array("id" => 403, "damage" => 0, "name" => "EnchantedBook"),
+        array("id" => 404, "damage" => 0, "name" => "RedstoneComparator"),
+        array("id" => 405, "damage" => 0, "name" => "NetherBrick"),
+        array("id" => 406, "damage" => 0, "name" => "NetherQuartz"),
+        array("id" => 407, "damage" => 0, "name" => "MinecartWithTnt"),
+        array("id" => 408, "damage" => 0, "name" => "MinecartWithHopper"),
+        array("id" => 417, "damage" => 0, "name" => "IronHorseArmor"),
+        array("id" => 418, "damage" => 0, "name" => "GoldHorseArmor"),
+        array("id" => 419, "damage" => 0, "name" => "DiamondHorseArmor"),
+        array("id" => 420, "damage" => 0, "name" => "Lead"),
+        array("id" => 421, "damage" => 0, "name" => "NameTag"),
+        array("id" => 422, "damage" => 0, "name" => "MinecartWithCommandBlock"),
+        array("id" => 2256, "damage" => 0, "name" => "13Disc"),
+        array("id" => 2257, "damage" => 0, "name" => "CatDisc"),
+        array("id" => 2258, "damage" => 0, "name" => "BlocksDisc"),
+        array("id" => 2259, "damage" => 0, "name" => "ChirpDisc"),
+        array("id" => 2260, "damage" => 0, "name" => "FarDisc"),
+        array("id" => 2261, "damage" => 0, "name" => "MallDisc"),
+        array("id" => 2262, "damage" => 0, "name" => "MellohiDisc"),
+        array("id" => 2263, "damage" => 0, "name" => "StalDisc"),
+        array("id" => 2264, "damage" => 0, "name" => "StradDisc"),
+        array("id" => 2265, "damage" => 0, "name" => "WardDisc"),
+        array("id" => 2266, "damage" => 0, "name" => "11Disc"),
+        array("id" => 2267, "damage" => 0, "name" => "WaitDisc")
+    );
+    
+    private $itemsById = [], $itemsByName = [];
+
+    public function __construct(){
+        foreach($this->items as $var => $c){
+            $this->itemsById[$c["id"].":".$c["damage"]] = $c["name"];
+            $this->itemsByName[strtolower($c["name"])] = $c["id"].":".$c["damage"];
+        }
+        unset($this->items);
+    }    
+    
+    public function getName($id, $damage = 0){
+        if(isset($this->itemsById[$id.":".$damage])) 
+            return $this->itemsById[$id.":".$damage]; 
+        return "ID ".$id.":".$damage;
+    }
+        
+    public function getBlock($name){
+        $name = strtolower(str_replace(" ", "", trim($name)));
+        if(isset($this->itemsByName[$name])){
+            $block = $this->itemsByName[$name];
+            $c = explode(":", $block);               
+            return \pocketmine\item\Item::get($c[0], $c[1]);      
+        }
+        return \pocketmine\item\Item::get(0, 0);
+    }    
+}<?php
+/* @author xionbig
+ * @link http://xionbig.altervista.org/SignShop 
+ * @link http://forums.pocketmine.net/plugins/signshop.668/
+ * @version 0.9.1 */
+
+namespace SignShop;
+
+use pocketmine\plugin\Plugin;
+use pocketmine\utils\TextFormat;
+
+class MoneyManager{
+    private $SignMain, $PocketMoney = false, $EconomyS = false, $MassiveEconomy = false;
+    
+    public function __construct($SignShop){
+        $this->SignMain = $SignShop;
+        
+        if($SignShop->getServer()->getPluginManager()->getPlugin("PocketMoney") instanceof Plugin)
+            $this->PocketMoney = $SignShop->getServer()->getPluginManager()->getPlugin("PocketMoney");
+
+        elseif($SignShop->getServer()->getPluginManager()->getPlugin("EconomyAPI")  instanceof Plugin)
+            $this->EconomyS = $SignShop->getServer()->getPluginManager()->getPlugin("EconomyAPI");
+        
+        elseif($SignShop->getServer()->getPluginManager()->getPlugin("MassiveEconomy") instanceof Plugin)
+            $this->MassiveEconomy = $SignShop->getServer()->getPluginManager()->getPlugin("MassiveEconomy");
+        
+        else{
+            $SignShop->getLogger()->info(TextFormat::RED."This plugin to work needs the plugin PocketMoney or EconomyS or MassiveEconomy.");
+            $SignShop->getServer()->shutdown();
+        }  
+    }
+    
+    public function getValue(){
+        if($this->PocketMoney == true) 
+            return "pm";
+        elseif($this->EconomyS == true) 
+            return "$";
+        elseif($this->MassiveEconomy == true)
+            return $this->MassiveEconomy->getMoneySymbol();
+    }    
+    
+    public function getMoney($player){
+        if($this->PocketMoney == true) 
+            return $this->PocketMoney->getMoney($player);
+        elseif($this->EconomyS == true) 
+            return $this->EconomyS->mymoney($player);  
+        elseif($this->MassiveEconomy == true)
+            return $this->MassiveEconomy->getMoney($player);
+        return 0;
+    }
+    
+    public function addMoney($player, $value){
+        if($this->PocketMoney == true) 
+            $this->PocketMoney->grantMoney($player, $value);
+        elseif($this->EconomyS == true) 
+            $this->EconomyS->setMoney($player, $this->getMoney($player) + $value);
+        elseif($this->MassiveEconomy == true)
+            $this->MassiveEconomy->setMoney($player, $this->getMoney($player) + $value);
+        else return;
+        
+        if($this->SignMain->getProvider()->existsPlayer($player)){
+            $get = $this->SignMain->getProvider()->getPlayer($player);  
+            if($value >=0){
+                $get["totEarned"] += $value;
+                $this->SignMain->getProvider()->setPlayer($player, $get);
+            }else{
+                $get["totSpent"] += $value;
+                $this->SignMain->getProvider()->setPlayer($player, $get);
+            }
+        }
+    }
+}<?php
+/* @author xionbig
+ * @link http://xionbig.altervista.org/SignShop 
+ * @link http://forums.pocketmine.net/plugins/signshop.668/
+ * @version 0.9.2 */
+
+namespace SignShop\EventListener;
+
+use pocketmine\event\Listener;
+use pocketmine\event\player\PlayerRespawnEvent;
+
+class PlayerSpawnEvent implements Listener{
+    protected $SignMain;
+    
+    public function __construct($SignShop){
+        $this->SignMain = $SignShop; 
+    }        
+    
+    public function playerSpawn(PlayerRespawnEvent $event){
+        $player = $event->getPlayer();
+        $this->SignMain->respawnAllSign();    
+       
+        $authorized = "unauth";
+        
+        if($this->SignMain->getSetup()->get("signCreated") == "admin" && $player->isOp()) $authorized = "auth";            
+        if($this->SignMain->getSetup()->get("signCreated") == "all") $authorized = "auth";
+            
+        if($this->SignMain->getProvider()->existsPlayer($player->getDisplayName())){
+            $get = $this->SignMain->getProvider()->getPlayer($player->getDisplayName());
+            if($get["earned"] > 0)
+                $player->sendMessage("[SignShop] ". str_replace("@@", $get["earned"], $this->SignMain->getMessages()["You_earned_@@_when_you_were_offline"]));
+            
+            if($get["changed"] < $this->SignMain->getSetup()->get("lastChanged"))
+                $get["authorized"] = $authorized;
+
+            $get["earned"] = 0;
+            $this->SignMain->getProvider()->setPlayer($player->getDisplayName(), $get);
+        }else
+            $this->SignMain->getProvider()->setPlayer($player->getDisplayName(), [
+                "authorized" => $authorized,
+                "changed" => time(),
+                "echo" => true,
+                "earned" => 0,
+                "totEarned" => 0,
+                "totSpent" => 0]);
+    }   
+}<?php
+/* @author xionbig
+ * @link http://xionbig.altervista.org/SignShop 
+ * @link http://forums.pocketmine.net/plugins/signshop.668/
+ * @version 0.9.2 */
+
+namespace SignShop\EventListener;
+
+use pocketmine\event\Listener;
+use pocketmine\event\player\PlayerInteractEvent;
+use pocketmine\item\Item;
+use pocketmine\math\Vector3;
+use pocketmine\block\Block;
+
+class PlayerTouchEvent implements Listener{
+    private $SignMain;
+
+    public function __construct($SignShop){
+        $this->SignMain = $SignShop;
+    }
+    
+    public function playerBlockTouch(PlayerInteractEvent $event){ 
+        if($event->getBlock()->getID() == Item::SIGN || $event->getBlock()->getID() == Item::SIGN_POST){
+            $player = $event->getPlayer();   
+                       
+            $world = str_replace(" ", "%", $event->getBlock()->getLevel()->getName());
+            $var = (Int)$event->getBlock()->getX().":".(Int)$event->getBlock()->getY().":".(Int)$event->getBlock()->getZ().":".$world;
+            
+            if($this->SignMain->getProvider()->existsSign($var)){
+                $get = $this->SignMain->getProvider()->getSign($var);  
+                
+                if(isset($this->SignMain->temp[$player->getDisplayName()])){   
+                    switch($this->SignMain->temp[$player->getDisplayName()]["action"]){
+                        case "remove":
+                            if(strtolower($get["maker"]) == strtolower($player->getDisplayName())){
+                                $event->getBlock()->getLevel()->setBlock(new Vector3($event->getBlock()->getX(), $event->getBlock()->getY(), $event->getBlock()->getZ()), Block::get(0), true, true);
+                                $this->SignMain->getProvider()->removeSign($var);
+                                $event->getPlayer()->sendMessage("[SignShop] ". $this->SignMain->getMessages()["The_Sign_successfully_removed"]); 
+                            }else                      
+                                $event->getPlayer()->sendMessage("[SignShop] ". $this->SignMain->getMessages()["The_selected_Sign_is_not_your"]);           
+                            break;                    
+                        
+                        case "refill":
+                            if(strtolower($get["maker"]) == strtolower($player->getDisplayName())){
+                                $item = Item::get($get["id"], $get["damage"], $this->SignMain->temp[$player->getDisplayName()]["amount"]);
+                                if($this->hasItemPlayer($player, $item) && $this->removeItemPlayer($player, $item)){
+                                    $get["available"] += $item->getCount();
+                                    
+                                    $this->SignMain->getProvider()->setSign($var, $get); 
+                                                    
+                                    $this->SignMain->respawnSign($var);
+                                    $event->getPlayer()->sendMessage("[SignShop] ". $this->SignMain->getMessages()["The_Sign_was_stocked_with_success"]);                                    
+                                }else
+                                    $event->getPlayer()->sendMessage("[SignShop] ".$this->SignMain->getMessages()["You_do_not_have_enough_blocks_to_fill_the_Sign"]);
+                            }else                      
+                                $event->getPlayer()->sendMessage("[SignShop] ". $this->SignMain->getMessages()["The_selected_Sign_is_not_your"]); 
+                            break; 
+
+                        case "view": 
+                            $mex = [str_replace("@@", $get["maker"], $this->SignMain->getMessages()["This_Sign_is_owned_by_@@"]),
+                                    str_replace("@@", date("M-d h:ia", $get["time"]), $this->SignMain->getMessages()["This_Sign_was_created_@@"]), 
+                                    str_replace("@@", $get["available"], $this->SignMain->getMessages()["There_are_still_@@_blocks/items"]), 
+                                    str_replace("@@", $get["sold"], $this->SignMain->getMessages()["They_were_sold_@@_blocks/items_with_this_Sign"]), 
+                                    str_replace("@@", $get["earned"]. $this->SignMain->getMoneyManager()->getValue(), $this->SignMain->getMessages()["The_owner_has_earned_@@"])
+                                ];
+                            
+                            foreach($mex as $message)
+                                $event->getPlayer()->sendMessage("[SignShop] ". $message);
+                            break;
+                        
+                        case "set":
+                            if(strtolower($get["maker"]) != strtolower($player->getDisplayName())){
+                                $event->getPlayer()->sendMessage("[SignShop] ". $this->SignMain->getMessages()["The_selected_Sign_is_not_your"]); 
+                                break;
+                            }
+                            
+                            switch($this->SignMain->temp[$player->getDisplayName()]["arg"]){
+                                case "amount":
+                                    $get["amount"] = $this->SignMain->temp[$player->getDisplayName()]["value"];
+                                
+                                    $this->SignMain->getProvider()->setSign($var, $get);
+                                
+                                    $event->getPlayer()->sendMessage("[SignShop] ". str_replace("@@", $get["amount"], $this->SignMain->getMessages()["You_set_the_amount_of_the_Sign_in_@@"]));
+                                    break;
+                                
+                                case "cost":
+                                    $get["cost"] = $this->SignMain->temp[$player->getDisplayName()]["value"];
+                                
+                                    $this->SignMain->getProvider()->setSign($var, $get);
+                            
+                                    $event->getPlayer()->sendMessage("[SignShop] ". str_replace("@@", $get["cost"], $this->SignMain->getMessages()["The_cost_of_the_contents_of_this_Sign_is_now_@@"]));
+                                    break;
+
+                                case "maker":
+                                    $name = strtolower($this->SignMain->temp[$player->getDisplayName()]["name"]);
+                                    if($this->SignMain->getProvider()->existsPlayer($name)){
+                                        
+                                        $get["maker"] = $name;                                
+                                        $this->SignMain->getProvider()->setSign($var, $get);
+                                    
+                                        $event->getPlayer()->sendMessage("[SignShop] ". str_replace("@@", $name, $this->SignMain->getMessages()["Now_this_Sign_is_owned_by_@@"]));
+                                    }else
+                                        $event->getPlayer()->sendMessage("[SignShop] ".$this->SignMain->getMessages()["The_player_was_not_found"]);
+                                    break;
+                                
+                                case "unlimited": 
+                                    $get["available"] = "unlimited";
+                                    $this->SignMain->getProvider()->setSign($var, $get);
+                                    
+                                    $event->getPlayer()->sendMessage("[SignShop] ". str_replace("@@", $get["cost"], "Now_this_Sign_has_the_unlimited_available"));
+                                    break;
+                            }
+                            $this->SignMain->respawnSign($var);
+                            break;          
+                    }
+                    unset($this->SignMain->temp[$player->getDisplayName()]);
+                    return;
+                }
+                if(strtolower($event->getPlayer()->getDisplayName()) == strtolower($get["maker"])){
+                    $player->sendMessage("[SignShop] ".$this->SignMain->getMessages()["You_can_not_buy_from_your_Sign"]);
+                    return;
+                }
+                if($player->getGamemode() == 1){
+                    $player->sendMessage("[SignShop] ". $this->SignMain->getMessages()["You_can_not_buy_in_creative"]);
+                    return;
+                }
+                        
+                if($this->SignMain->getMoneyManager()->getMoney($player->getDisplayName()) < $get["cost"])
+                    $player->sendMessage("[SignShop] ". $this->SignMain->getMessages()["You_do_not_have_enough_money"]);   
+                elseif($get["available"] != "unlimited" && $get["available"] - $get["amount"] < 0)
+                    $player->sendMessage("[SignShop] ". $this->SignMain->getMessages()["The_content_of_the_Sign_is_sold_out"]);
+                else{
+                    $item = Item::get($get["id"], $get["damage"], $get["amount"]);             
+                    if($player->getInventory()->canAddItem($item)){
+                        $this->SignMain->getMoneyManager()->addMoney($get["maker"], $get["cost"]);   
+                        $this->SignMain->getMoneyManager()->addMoney($player->getDisplayName(), -($get["cost"]));
+
+                        $player->getInventory()->addItem($item);
+                               
+                        if($get["available"] != "unlimited") 
+                            $get["available"] -= $get["amount"];
+                        $get["sold"] += $get["amount"];
+                        $get["earned"] += $get["cost"];
+
+                        $this->SignMain->getProvider()->setSign($var, $get); 
+                                                        
+                        $player->sendMessage("[SignShop] ". $this->SignMain->getMessages()["You_bought_the_contents_of_the_Sign"]);
+                            
+                        $maker = $this->getPlayer($get["maker"]);
+                        if($maker != false && $this->SignMain->getProvider()->getPlayer($get["maker"])["echo"] != false)
+                            $maker->sendMessage("[SignShop] +".$get["cost"].$this->SignMain->getMoneyManager()->getValue()." payment from ".$player->getDisplayName());
+                        else{
+                            $getPlayer = $this->SignMain->getProvider()->getPlayer($get["maker"]);
+                            $getPlayer["earned"] += $get["cost"]; 
+                            $this->SignMain->getProvider()->setPlayer($get["maker"], $getPlayer);
+                        }
+                    }else
+                        $event->getPlayer()->sendMessage("[SignMain] ". $this->SignMain->getMessages()["You_do_not_have_the_space_to_buy_the_contents_of_this_Sign"]);
+                } 
+                           
+                $this->SignMain->respawnSign($var);
+            }
+        }   
+    }       
+    
+    private function removeItemPlayer(Player $player, Item $item){
+        if($this->SignMain->getProvider()->getPlayer(strtolower($player->getDisplayName()))["authorized"] == "super") return true;
+        $ris = $item->getCount();
+        if($player->getGamemode() != 1){
+            for($i = 0; $i <= $player->getInventory()->getSize(); $i = $i + 1){
+                $inv = $player->getInventory()->getItem($i);
+                if($inv->getID() == $item->getID() && $inv->getDamage() == $item->getDamage()){
+                    $ris = $inv->getCount() - $ris;
+                    if($ris <= 0){
+                        $player->getInventory()->clear($i);
+                        $ris = -($ris);
+                    }else
+                        $player->getInventory()->setItem($i, Item::get($item->getID(), $item->getDamage(), $ris));
+                }
+            }
+        }
+        return true;
+    }
+
+    private function hasItemPlayer(Player $player, Item $item){
+        if($this->SignMain->getProvider()->getPlayer(strtolower($player->getDisplayName()))["authorized"] == "super") return true;
+        $ris = 0;
+        if($player->getGamemode() != 1){
+            for($i = 0; $i <= $player->getInventory()->getSize(); ++$i){
+                $inv = $player->getInventory()->getItem($i);
+                if($inv->getID() == $item->getID() && $inv->getDamage() == $item->getDamage())
+                    $ris = $ris + $inv->getCount();      
+            }
+        }
+        if($ris >= $item->getCount()) return true;
+        return false;
+    }
+    
+    public function getPlayer($player){
+        return $this->SignMain->getPlayer($player);    
+    }
+}<?php
+/* @author xionbig
+ * @link http://xionbig.altervista.org/SignShop 
+ * @link http://forums.pocketmine.net/plugins/signshop.668/
+ * @version 0.9.2 */
+
+namespace SignShop\EventListener;
+
+use pocketmine\event\Listener;
+use pocketmine\event\block\BlockBreakEvent;
+use pocketmine\item\Item;
+
+class PlayerBlockBreakEvent implements Listener{
+    private $SignMain;
+
+    public function __construct($SignShop){
+        $this->SignMain = $SignShop;
+    }
+    
+    public function playerBlockBreak(BlockBreakEvent $event){
+        if($event->getBlock()->getID() == Item::SIGN || $event->getBlock()->getID() == Item::SIGN_POST){
+            $player = $event->getPlayer();
+            
+            $world = str_replace(" ", "%", $event->getBlock()->getLevel()->getName());            
+            $var = (Int)$event->getBlock()->getX().":".(Int)$event->getBlock()->getY().":".(Int)$event->getBlock()->getZ().":".$world;
+            
+            if($this->SignMain->getProvider()->existsSign($var)){
+                $get = $this->SignMain->getProvider()->getSign($var);
+                
+                if(strtolower($get["maker"]) == strtolower($player->getDisplayName())){
+                    if($get["available"] != "unlimited")
+                        $item = Item::get($get["id"], $get["damage"], $get["available"]);
+                    else
+                        $item = Item::get(0, 0, 0);
+                    
+                    if($player->getInventory()->canAddItem($item)){
+                        $player->getInventory()->addItem($item);
+                              
+                        $this->SignMain->getProvider()->removeSign($var);
+                        
+                        $player->sendMessage("[SignShop] ". $this->SignMain->getMessages()["The_Sign_successfully_removed"]);
+                    }else{
+                        $player->sendMessage("[SignShop] ". $this->SignMain->getMessages()["You_need_to_free_up_space_from_your_inventory_to_remove_this_Sign"]);
+                        $event->setCancelled();
+                    }                        
+                }else{
+                    $event->getPlayer()->sendMessage("[SignShop] ". $this->SignMain->getMessages()["The_selected_Sign_is_not_your"]);
+                    $event->setCancelled();   
+                }
+            }
+        }
+    }
+}<?php
+/* @author xionbig
+ * @link http://xionbig.altervista.org/SignShop 
+ * @link http://forums.pocketmine.net/plugins/signshop.668/
+ * @version 0.9.2 */
+
+namespace SignShop\EventListener;
+
+use pocketmine\event\Listener;
+use pocketmine\event\block\SignChangeEvent;
+use pocketmine\Player;
+use pocketmine\item\Item;
+
+class PlayerSignCreateEvent implements Listener{
+    protected $SignMain;
+
+    public function __construct($SignShop){
+        $this->SignMain = $SignShop;
+    }
+    
+    public function signChangeEvent(SignChangeEvent $event){
+        $line0 = strtolower(trim($event->getLine(0)));
+        $line1 = trim($event->getLine(1));
+        $line2 = trim($event->getLine(2));
+        $line3 = trim($event->getLine(3));
+        
+        if($line0 == "[signshop]" || $line0 == "/signshop"){
+            $player = $event->getPlayer();
+            $error = "";
+            if($this->SignMain->getProvider()->getPlayer($player->getDisplayName())["authorized"] != "unauth"){      
+                if(is_numeric($line1) && $line1 > 0){
+                    $id = $line1;
+                    $damage = 0;                    
+                }elseif(count(explode(":", $line1)) == 2){                    
+                    $line1 = explode(":", $line1);
+                    $id = $line1[0];
+                    $damage = $line1[1];
+                    
+                    if(!is_numeric($id) || !is_numeric($damage)) $error = "Item NotNumeric";
+                }else{
+                    $item = $this->SignMain->getItems()->getBlock($line1); 
+                    $id = $item->getID();
+                    $damage = $item->getDamage();
+                    if($id == 0) $error = "Item Invalid";
+                }
+                               
+                $amount = 0;
+                if(count(explode("x", $line2)) == 2){
+                    $line2 = explode("x", $line2);
+                    if(is_numeric($line2[0]) && is_numeric($line2[1])){
+                        $amount = $line2[0];
+                        $cost = $line2[1];
+                        if($cost < 0 || $amount < 0 || $amount > 45 * 64) $error = "Invalid Amount|Cost";
+                    }else $error = "Amount|Cost NotNumeric";
+                }else $error = "Invalid Amount|Cost";
+                              
+                $count = $line3;
+                if(is_numeric($line3)){
+                    if($line3 < $amount) $error = "Invalid Available";                    
+                }else{
+                    if($line3 == "unlimited"){
+                        if($this->SignMain->getProvider()->getPlayer($player->getDisplayName())["authorized"] == "super")
+                            $count = 0;    
+                        else
+                            $error = "Player NotAuthorized";
+                    }else
+                        $error = "Available NotNumeric";
+                } 
+                
+                if($error == ""){
+                    if($this->hasItemPlayer($player, Item::get($id, $damage, $count)) == true && $this->removeItemPlayer($player, Item::get($id, $damage, $count)) == true){
+                        
+                        $world = str_replace(" ", "%", $event->getBlock()->getLevel()->getName());
+                        $var = (Int)$event->getBlock()->getX().":".(Int)$event->getBlock()->getY().":".(Int)$event->getBlock()->getZ().":".$world;
+                            
+                        $this->SignMain->getProvider()->setSign($var, [
+                            "id" => $id, 
+                            "damage" => $damage, 
+                            "amount" => $amount, 
+                            "available" => $line3, 
+                            "cost" => $cost, 
+                            "maker" => $player->getDisplayName(), 
+                            "time" => time(), 
+                            "sold" => 0, 
+                            "earned" => 0, 
+                            "direction" => $event->getBlock()->getDamage()]);
+                            
+                        $player->sendMessage("[SignShop] ".$this->SignMain->getMessages()["Sign_successfully_created"]);
+                           
+                        $event->setLine(0, "[".$player->getDisplayName()."]");
+                        $event->setLine(1, $this->SignMain->getItems()->getName($id, $damage));
+                        $event->setLine(2, "Amount: x".$amount);
+                        $event->setLine(3, "Price: ".$cost.$this->SignMain->getMoneyManager()->getValue());
+   
+                        $this->SignMain->respawnSign($var);   
+                    }else{
+                        $player->sendMessage("[SignShop] ".$this->SignMain->getMessages()["The_item_was_not_found_or_does_not_have_enough_items"]); 
+                        $error = "Player Error";                        
+                    }
+                }
+                if($error != ""){
+                    $error = explode(" ", $error);
+                    
+                    $event->setLine(0, "[SignShop]");
+                    $event->setLine(1, ":ERROR:");
+                    $event->setLine(2, $error[0]);
+                    $event->setLine(3, $error[1]);
+                    
+                    $player->sendMessage("[SignShop] ".$this->SignMain->getMessages()["There_is_a_problem_with_the_creation_of_the_Sign"]);
+                }
+            }else{
+                $player->sendMessage("[SignShop] ".$this->SignMain->getMessages()["You_are_not_authorized_to_run_this_command"]);
+                $event->setLine(0, "[SignShop]");
+                $event->setLine(1, "Error:");
+                $event->setLine(2, "PlayerNot");
+                $event->setLine(3, "Authorized");                
+            }
+        }
+    }
+    
+    private function removeItemPlayer(Player $player, Item $item){
+        if($this->SignMain->getProvider()->getPlayer($player->getDisplayName()) == "super") return true; 
+        $ris = $item->getCount();
+        
+        if($player->getGamemode() != 1){
+            for($i = 0; $i <= $player->getInventory()->getSize(); $i = $i + 1){
+                $inv = $player->getInventory()->getItem($i);
+                if($inv->getID() == $item->getID() && $inv->getDamage() == $item->getDamage()){
+                    $ris = $inv->getCount() - $ris;
+
+                    if($ris <= 0){
+                        $player->getInventory()->clear($i);
+                        $ris = -($ris);
+                    }else{
+                        $player->getInventory()->setItem($i, Item::get($item->getID(), $item->getDamage(), $ris));
+                        return true;
+                        
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    private function hasItemPlayer(Player $player, Item $item){
+        if($this->SignMain->getProvider()->getPlayer($player->getDisplayName()) == "super") return true;
+        
+        $ris = 0;
+        if($player->getGamemode() != 1){
+            for($i = 0; $i <= $player->getInventory()->getSize(); ++$i){
+                $inv = $player->getInventory()->getItem($i);
+                if($inv->getID() == $item->getID() && $inv->getDamage() == $item->getDamage())
+                    $ris = $ris + $inv->getCount();      
+            }
+        }
+        if($ris >= $item->getCount()) return true;
+        return false;
+    }
+}

@@ -1,0 +1,566 @@
+name: HealthBar
+main: HealthBar\Loader
+version: 1.0.0
+api: 1.0.0
+author: LegendOfMCPE
+website: https://github.com/LegendOfMCPE/HealthBar
+softdepend: EssentialsPE
+
+permissions:
+    healthbar:
+        default: op
+        description: "Acces any healthbar feature"
+        children:
+            healthbar.command:
+                default: op
+                description: "Acces any command feature"
+                children:
+                    healthbar.command.style:
+                        default: op
+                        description: "Modify the global style of the bar"
+                    healthbar.command.position:
+                        default: op
+                        description: "Modify the global position of the bar"
+                    healthbar.command.toggle:
+                        default: op
+                        description: "Toggle any player's bar"
+                        children:
+                            healthbar.command.toggle.use:
+                                default: op
+                                description: "Toggle your bar"
+                            healthbar.command.toggle.other:
+                                default: op
+                                description: "Toggle other player's bar"<?php
+namespace HealthBar;
+
+use HealthBar\OtherEvents\EssentialsPEEvents;
+use pocketmine\Player;
+use pocketmine\plugin\Plugin;
+use pocketmine\plugin\PluginBase;
+use pocketmine\utils\TextFormat;
+use EssentialsPE\Loader as EssentialsPE;
+
+class Loader extends PluginBase{
+    public $essentialspe;
+    private $canRemove;
+
+    public function onEnable(){
+        $this->saveDefaultConfig();
+        $this->getServer()->getCommandMap()->register("healthbar", new HealthBarCommand($this));
+        $this->getServer()->getPluginManager()->registerEvents(new EventHandler($this), $this);
+        $this->checkConfiguration();
+
+        $ess = $this->getServer()->getPluginManager()->getPlugin("EssentialsPE");
+        if($ess instanceof Plugin && $ess->isEnabled()){
+            $this->essentialspe = new EssentialsPE();
+            $this->getServer()->getPluginManager()->registerEvents(new EssentialsPEEvents($this), $this);
+        }
+    }
+
+    public function onDisable(){
+        if($this->canRemove === true){
+            foreach($this->getServer()->getOnlinePlayers() as $p){
+                $this->setHealthBar($p, false);
+            }
+        }
+    }
+
+    private function checkConfiguration(){
+        if(!$this->getStyle()){
+            $this->getLogger()->info(TextFormat::YELLOW . "[HealthBar] " . TextFormat::RED . "Unknown style given, HealthBar will be disabled!");
+            $this->getServer()->getPluginManager()->disablePlugin($this);
+            $this->setEnabled(false);
+            return false;
+        }elseif(!$this->getPosition()){
+            $this->getLogger()->info(TextFormat::YELLOW . "[HealthBar] " . TextFormat::RED . "Unknown position given, HealthBar will be disabled!");
+            $this->getServer()->getPluginManager()->disablePlugin($this);
+            $this->setEnabled(false);
+            return false;
+        }else{
+           $this->enableHealthBar();
+            return true;
+        }
+    }
+
+    private function enableHealthBar(){
+        $this->canRemove = true;
+        foreach($this->getServer()->getOnlinePlayers() as $p){
+            $this->setHealthBar($p, true);
+        }
+    }
+
+    /*
+     *  .----------------.  .----------------.  .----------------.
+     * | .--------------. || .--------------. || .--------------. |
+     * | |      __      | || |   ______     | || |     _____    | |
+     * | |     /  \     | || |  |_   __ \   | || |    |_   _|   | |
+     * | |    / /\ \    | || |    | |__) |  | || |      | |     | |
+     * | |   / ____ \   | || |    |  ___/   | || |      | |     | |
+     * | | _/ /    \ \_ | || |   _| |_      | || |     _| |_    | |
+     * | ||____|  |____|| || |  |_____|     | || |    |_____|   | |
+     * | |              | || |              | || |              | |
+     * | '--------------' || '--------------' || '--------------' |
+     *  '----------------'  '----------------'  '----------------'
+     *
+     */
+
+    protected $players = [];
+
+    public function getPlayer($player){
+        $player = strtolower($player);
+        $r = false;
+        foreach($this->getServer()->getOnlinePlayers() as $p){
+            if(strtolower($p->getName()) == $player || strtolower($p->getDisplayName()) == $player){
+                $r = $p;
+            }
+        }
+        return $r;
+    }
+
+    public function getStyle(){
+        $style = strtolower($this->getConfig()->get("style"));
+        switch(strtolower($style)){
+            case "default":
+                return $style;
+                break;
+        }
+        return false;
+    }
+
+    public function getPosition(){
+        $position = strtolower($this->getConfig()->get("position"));
+        switch($position){
+            case "above":
+            case "under":
+            case "left":
+            case "right":
+                return $position;
+                break;
+        }
+        return false;
+    }
+
+    public function setStyle($style){
+        $style = strtolower($style);
+        switch($style){
+            case "default":
+                $this->getConfig()->set("style", $style);
+                $this->getConfig()->save();
+                break;
+        }
+        foreach($this->getServer()->getOnlinePlayers() as $p){
+            $this->updateHealthBar($p, $p->getMaxHealth(), $p->getDisplayName());
+        }
+        return true;
+    }
+
+    public function setPosition($position){
+        $position = strtolower($position);
+        switch($position){
+            case "above":
+            case "under":
+            case "left":
+            case "right":
+                $this->getConfig()->set("position", $position);
+                $this->getConfig()->save();
+                break;
+        }
+        foreach($this->getServer()->getOnlinePlayers() as $p){
+            $this->updateHealthBar($p, $p->getMaxHealth(), $p->getDisplayName());
+        }
+        return true;
+    }
+
+    public function updateHealthBar(Player $player, $health = false, $name = false){
+        if(!$this->isHealthBarEnabled($player)){
+            return false;
+        }
+        $style = $this->getStyle();
+        $position = $this->getPosition();
+        $maxhealth = $player->getMaxHealth();
+        if($health === false){
+            $health = $player->getHealth();
+        }elseif($name === false){
+            $name = $player->getDisplayName();
+        }
+
+        if($style === false || $position === false){
+            return false;
+        }
+
+        switch($style){
+            case "default":
+                $style = "[" . $health . "/" . $maxhealth . "]";
+                break;
+            /*case "retro":
+                $bar = "";
+                $h = $health;
+                $mh = $maxhealth - $health;
+                while($h >= 1 && $h % 2){
+                    $bar .= $bar . "|";
+                    $h--;
+                    $h--;
+                }
+                while($mh >= 1 && $mh % 2){
+                    $bar .= $bar . ":";
+                    $mh--;
+                    $mh--;
+                }
+                $style = $bar;
+                break;
+            case "slim":
+                $bar = "";
+                $h = $health;
+                $mh = $maxhealth - $health;
+                while($h >= 1 && $h % 2){
+                    $bar .= $bar . "=";
+                    $h--;
+                    $h--;
+                }
+                while($mh >= 1 && $mh % 2){
+                    $bar .= $bar . "-";
+                    $mh--;
+                    $mh--;
+                }
+                $style = $bar;
+                break;*/
+        }
+
+        switch($position){
+            case "above":
+                $player->setNameTag($style . "\n" . $name);
+                break;
+            case "under":
+                $player->setNameTag($name . "\n" . $style);
+                break;
+            case "left":
+                $player->setNameTag($style . " " . $name);
+                break;
+            case "right":
+                $player->setNameTag($name . " " . $style);
+                break;
+        }
+        return true;
+    }
+
+    public function removeHealthBar(Player $player){
+        if($this->canRemove === true){
+            $player->setNameTag($player->getDisplayName());
+        }
+    }
+
+    public function getHealthBar(){
+        $style = $this->getStyle();
+        $position = $this->getPosition();
+        $maxhealth = "maxhealth";
+        $health = "health";
+        $name = "name";
+
+        if($style === false || $position === false){
+            return false;
+        }
+
+        switch($style){
+            case "default":
+                $style = "[" . $health . "/" . $maxhealth . "]";
+                break;
+        }
+
+        $bar = "";
+        switch($position){
+            case "above":
+                $bar = $style . "\n" . $name;
+                break;
+            case "under":
+                $bar = $name . "\n" . $style;
+                break;
+            case "left":
+                $bar = $style . " " . $name;
+                break;
+            case "right":
+                $bar = $name . " " . $style;
+                break;
+        }
+        return $bar;
+    }
+
+    public function isHealthBarEnabled(Player $player){
+        if(!isset($this->players[$player->getName()])){
+            $this->players[$player->getName()] = true;
+        }
+        if($this->players[$player->getName()] === false){
+            return false;
+        }else{
+            return true;
+        }
+    }
+
+    public function setHealthBar(Player $player, $value = true, $health = false){
+        if(!is_bool($value)){
+            return false;
+        }
+        $this->players[$player->getName()] = $value;
+        if($value === false){
+            $this->removeHealthBar($player);
+        }else{
+            $this->updateHealthBar($player, $health);
+        }
+        return true;
+    }
+}
+<?php
+namespace HealthBar;
+
+use pocketmine\command\Command;
+use pocketmine\command\CommandSender;
+use pocketmine\command\PluginIdentifiableCommand;
+use pocketmine\Player;
+use pocketmine\utils\TextFormat;
+
+class HealthBarCommand extends Command implements PluginIdentifiableCommand{
+    public $plugin;
+
+    public function __construct(Loader $plugin){
+        parent::__construct("healthbar", "Toggle HealthBar", "Usage: /healthbar <style|position|toggle>", ["hbar"]);
+        $this->setPermission("healthbar.command");
+        $this->plugin = $plugin;
+    }
+
+    public function getPlugin(){
+        return $this->plugin;
+    }
+
+    public function execute(CommandSender $sender, $alias, array $args){
+        if(!$this->testPermission($sender)){
+            return false;
+        }
+        if(count($args) < 1 || count($args) > 3){
+            $sender->sendMessage(TextFormat::RED . "Usage: " . $this->getUsage());
+            return false;
+        }
+        switch(count($args)){
+            case 1:
+                switch(strtolower($args[0])){
+                    case "style":
+                        if(!$sender->hasPermission("healthbar.command.style")){
+                            $sender->sendMessage(TextFormat::RED . $this->getPermissionMessage());
+                            return false;
+                        }
+                        $sender->sendMessage(TextFormat::RED . "Usage: /healthbar style <desired style>");
+                        return true;
+                        break;
+                    case "position":
+                        if(!$sender->hasPermission("healthbar.command.position")){
+                            $sender->sendMessage(TextFormat::RED . $this->getPermissionMessage());
+                            return false;
+                        }
+                        $sender->sendMessage(TextFormat::RED . "Usage: /healthbar position <desired position>");
+                        return true;
+                        break;
+                    case "toggle":
+                        if(!$sender->hasPermission("healthbar.command.toggle")){
+                            $sender->sendMessage(TextFormat::RED . $this->getPermissionMessage());
+                            return false;
+                        }
+                        if(!$sender instanceof Player){
+                            $sender->sendMessage(TextFormat::RED . "Usage: /healthbar toggle <on|off> <player>");
+                        }else{
+                            $sender->sendMessage(TextFormat::RED . "Usage: /healthbar toggle <on|off> [player]");
+                        }
+                        return true;
+                        break;
+                    default:
+                        $sender->sendMessage(TextFormat::RED . "Usage: " . $this->getUsage());
+                        break;
+                }
+                return true;
+                break;
+            case 2:
+                switch(strtolower($args[0])){
+                    case "style":
+                        if(!$sender->hasPermission("healthbar.command.style")){
+                            $sender->sendMessage(TextFormat::RED . $this->getPermissionMessage());
+                            return false;
+                        }
+                        switch(strtolower($args[1])){
+                            case "default":
+                                $this->plugin->setStyle(strtolower($args[1]));
+                                $sender->sendMessage(TextFormat::YELLOW . "[HealthBar] Updating style...");
+                                return true;
+                                break;
+                            default:
+                                $sender->sendMessage(TextFormat::RED . "Unknown style given, HealthBar will not be updated.");
+                                break;
+                        }
+                        return true;
+                        break;
+                    case "position":
+                        if(!$sender->hasPermission("healthbar.command.position")){
+                            $sender->sendMessage(TextFormat::RED . $this->getPermissionMessage());
+                            return false;
+                        }
+                        switch(strtolower($args[1])){
+                            case "above":
+                            case "under":
+                            case "left":
+                            case "right":
+                                $this->plugin->setPosition(strtolower($args[1]));
+                                $sender->sendMessage(TextFormat::YELLOW . "[HealthBar] Updating position...");
+                                return true;
+                                break;
+                            default:
+                                $sender->sendMessage(TextFormat::RED . "Unknown position given, HealthBar will not be updated.");
+                                break;
+                        }
+                        return true;
+                        break;
+                    case "toggle":
+                        if(!$sender->hasPermission("healthbar.command.toggle.use")){
+                            $sender->sendMessage(TextFormat::RED . $this->getPermissionMessage());
+                            return false;
+                        }
+                        if(!$sender instanceof Player){
+                            $sender->sendMessage(TextFormat::RED . "Usage: /healthbar toggle <on|off> <player>");
+                        }
+                        switch(strtolower($args[1])){
+                            case "on":
+                                $sender->sendMessage(TextFormat::YELLOW . "Setting your HealthBar...");
+                                $this->plugin->setHealthBar($sender, true, $sender->getHealth());
+                                return true;
+                                break;
+                            case "off":
+                                $sender->sendMessage(TextFormat::YELLOW . "Removing your HealthBar...");
+                                $this->plugin->setHealthBar($sender, false);
+                                return true;
+                                break;
+                            default:
+                                $sender->sendMessage(TextFormat::RED . "Usage: /healthbar toggle <on|off> [player]");
+                                break;
+                        }
+                        return true;
+                        break;
+                    default:
+                        $sender->sendMessage(TextFormat::RED . "Usage: " . $this->getUsage());
+                        break;
+                }
+                return true;
+                break;
+            case 3:
+                if(strtolower($args[0]) != "toggle"){
+                    $sender->sendMessage(TextFormat::RED . "Usage: " . $this->getUsage());
+                    return false;
+                }else{
+                    if(!$sender->hasPermission("healthbar.command.toggle.other")){
+                        $sender->sendMessage(TextFormat::RED . $this->getPermissionMessage());
+                        return false;
+                    }
+                    $player = $this->plugin->getPlayer($args[2]);
+                    if($player === false){
+                        $sender->sendMessage(TextFormat::RED . "[Error] Player not found.");
+                    }else{
+                        switch(strtolower($args[1])){
+                            case "on":
+                                $sender->sendMessage(TextFormat::YELLOW . "Setting player' HealthBar...");
+                                $player->sendMessage(TextFormat::YELLOW . "Setting your HealthBar...");
+                                $this->plugin->setHealthBar($player, true, $player->getHealth());
+                                return true;
+                                break;
+                            case "off":
+                                $sender->sendMessage(TextFormat::YELLOW . "Removing player' HealthBar...");
+                                $player->sendMessage(TextFormat::YELLOW . "Removing your HealthBar...");
+                                $this->plugin->setHealthBar($player, false);
+                                return true;
+                                break;
+                            default:
+                                if(!$sender instanceof Player){
+                                    $sender->sendMessage(TextFormat::RED . "Usage: /healthbar toggle <on|off> <player>");
+                                }else{
+                                    $sender->sendMessage(TextFormat::RED . "Usage: /healthbar toggle <on|off> [player]");
+                                }
+                                break;
+                        }
+                    }
+                }
+                return true;
+                break;
+        }
+        return true;
+    }
+} <?php
+namespace HealthBar;
+
+use pocketmine\event\entity\EntityDamageByEntityEvent;
+use pocketmine\event\entity\EntityDamageEvent;
+use pocketmine\event\entity\EntityRegainHealthEvent;
+use pocketmine\event\Listener;
+use pocketmine\event\player\PlayerJoinEvent;
+use pocketmine\Player;
+use pocketmine\Server;
+
+class EventHandler implements Listener{
+    /** @var \HealthBar\Loader  */
+    public $plugin;
+
+    public function __construct(Loader $plugin){
+        $this->plugin = $plugin;
+    }
+
+    /**
+     * @param PlayerJoinEvent $event
+     */
+    public function onPlayerJoin(PlayerJoinEvent $event){
+        $player = $event->getPlayer();
+        $this->plugin->updateHealthBar($player);
+    }
+
+    /**
+     * @param EntityRegainHealthEvent $event
+     */
+    public function onRegainHealth(EntityRegainHealthEvent $event){
+        $entity = $event->getEntity();
+        if($entity instanceof Player && !$event->isCancelled()){
+            $health = $entity->getHealth() + $event->getAmount();
+            if($health > $entity->getMaxHealth()){
+                $health = $entity->getMaxHealth();
+            }
+            $this->plugin->updateHealthBar($entity, $health);
+        }
+    }
+
+    /**
+     * @param EntityDamageEvent $event
+     */
+    public function onHealthLose(EntityDamageEvent $event){
+        $entity = $event->getEntity();
+        if($entity instanceof Player && !$event->isCancelled()){
+            if(Server::getGamemodeString($entity->getGamemode()) === "SPECTATOR" || Server::getGamemodeString($entity->getGamemode()) ===  "CREATIVE"){
+                $event->setCancelled(true);
+            }else{
+                $health = $entity->getHealth() - $event->getFinalDamage();
+                $this->plugin->updateHealthBar($entity, $health);
+            }
+        }
+    }
+
+    /**
+     * @param EntityDamageByEntityEvent $event
+     */
+    public function onAttack(EntityDamageByEntityEvent $event){
+        $entity = $event->getEntity();
+        if($entity instanceof Player && !$event->isCancelled()){
+            if(Server::getGamemodeString($entity->getGamemode()) === "SPECTATOR" || Server::getGamemodeString($entity->getGamemode()) ===  "CREATIVE"){
+                $event->setCancelled(true);
+            }else{
+                $health = $entity->getHealth() - $event->getFinalDamage();
+                $this->plugin->updateHealthBar($entity, $health);
+            }
+        }
+    }
+} # Change the position of the health
+# above: Put the health above the player Nametag
+# under: Put the health under the player Nametag
+position: under
+
+# Change the health style
+# Check out our styles list at: https://github.com/LegendOfMCPE/HealthBar/wiki/Styles-list
+style: default

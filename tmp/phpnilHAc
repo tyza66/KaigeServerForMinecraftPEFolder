@@ -1,0 +1,2079 @@
+name: EconomyAPI
+main: onebone\economyapi\EconomyAPI
+version: "2.0.4"
+author: onebone
+api:
+- 1.0.0
+- 1.1.0
+- 1.2.0
+- 1.2.1
+- 1.3.0
+- 1.3.1
+- 1.4.0
+- 1.4.1
+
+permissions:
+ economyapi.*:
+  default: op
+  description: Allows to control all of functions in EconomyAPI
+  children:
+   economyapi.command.*:
+    default: op
+    description: Allows to use all of commands in EconomyAPI
+    children:
+     economyapi.command.setmoney:
+      default: op
+      description: Allows to set player's money
+     economyapi.command.mymoney:
+      description: Allows player to see his/her money
+      default: true
+     economyapi.command.economys:
+      description: Allows player to see list of registered plugin compatiable with EconomyAPI
+      default: true
+     economyapi.command.givemoney:
+      description: Allows player to give money to others
+      default: op
+     economyapi.command.pay:
+      description: Allows player to pay to someone
+      default: true
+     economyapi.command.seemoney:
+      description: Allows player to see others' money
+      default: true
+     economyapi.command.setlang:
+      description: Allows player to set his/her language
+      default: true
+     economyapi.command.takedebt:
+      description: Allows player to take debt from plugin
+      default: true
+     economyapi.command.topmoney:
+      description: Allows player to see top money list
+      default: true
+     economyapi.command.bank:
+      description: Allows player to manage bank account
+      default: true
+     economyapi.command.bankadmin:
+      description: Allows player to manage others' bank account
+      default: op
+     economyapi.command.mystatus:
+      description: Allows player to see his/her financial status
+      default: true
+     economyapi.command.takemoney:
+      description: Allows player to take money from others
+      default: op
+     economyapi.command.returndebt:
+      description: Allows player to return debt
+      default: true
+     economyapi.command.mydebt:
+      description: Allows player to see his/her money
+      default: true<?php
+
+namespace onebone\economyapi;
+
+use onebone\economyapi\event\debt\DebtChangedEvent;
+use onebone\economyapi\event\money\MoneyChangedEvent;
+use pocketmine\utils\Config;
+use pocketmine\utils\TextFormat;
+use pocketmine\event\Listener;
+use pocketmine\event\player\PlayerLoginEvent;
+use pocketmine\event\player\PlayerQuitEvent;
+use pocketmine\plugin\PluginBase;
+use pocketmine\Player;
+use pocketmine\scheduler\CallbackTask;
+
+use onebone\economyapi\event\money\AddMoneyEvent;
+use onebone\economyapi\event\money\ReduceMoneyEvent;
+use onebone\economyapi\event\money\SetMoneyEvent;
+use onebone\economyapi\event\account\CreateAccountEvent;
+use onebone\economyapi\event\debt\AddDebtEvent;
+use onebone\economyapi\event\debt\ReduceDebtEvent;
+use onebone\economyapi\event\bank\AddMoneyEvent as BankAddMoneyEvent;
+use onebone\economyapi\event\bank\ReduceMoneyEvent as BankReduceMoneyEvent;
+use onebone\economyapi\event\bank\MoneyChangedEvent as BankMoneyChangedEvent;
+use onebone\economyapi\database\DataConverter;
+
+class EconomyAPI extends PluginBase implements Listener{
+
+	/**
+	 * @var EconomyAPI
+	 */
+	private static $obj = null;
+	private $path;
+	private $money, $bank;
+	/**
+	 * @var Config
+	 */
+	private $config;
+	/**
+	 * @var Config
+	 */
+	private $command;
+
+	private $schedules, $scheduleId, $lastActivity;  // scheduler related
+
+	private $list;
+
+	private $langRes, $playerLang; // language system related
+	
+	private $monetaryUnit;
+	
+	/**
+	 * @var int RET_ERROR_1 Unknown error 1
+	*/
+	const RET_ERROR_1 = -4;
+	
+	/**
+	 * @var int RET_ERROR_2 Unknown error 2
+	*/
+	const RET_ERROR_2 = -3;
+	
+	/**
+	@var int RET_CANCELLED Task cancelled by event
+	*/
+	const RET_CANCELLED = -2;
+	
+	/**
+	 * @var int RET_NOT_FOUND Unable to process task due to not found data
+	*/
+	const RET_NOT_FOUND = -1;
+	
+	/**
+	 * @var int RET_INVALID Invalid amount of data
+	*/
+	const RET_INVALID = 0;
+	
+	/**
+	 * @var int RET_SUCCESS The task was successful
+	*/
+	const RET_SUCCESS = 1;
+	
+	const CURRENT_DATABASE_VERSION = 0x02;
+	
+	private $langList = array(
+		"def" => "Default",
+		"en" => "English",
+		"ko" => "한국어",
+		"it" => "Italiano",
+		"ch" => "中文",
+		"user-define" => "User Define"
+	);
+
+	public static function getInstance(){
+		return self::$obj;
+	}
+	
+	public function onLoad(){
+		self::$obj = $this;
+		
+		$this->path = $this->getDataFolder();
+
+		$this->scheduleId = array();
+		$this->lastActivity = array();
+		$this->schedules = array();
+
+		$this->list = array();
+		$this->money = array();
+		$this->bank = array();
+
+		$this->playerLang = array();
+		$this->langRes = array();
+	}
+	
+	public function onEnable(){
+		@mkdir($this->path);
+		
+		$this->createConfig();
+		$this->scanResources();
+		
+		file_put_contents($this->path."ReadMe.txt", $this->readResource("ReadMe.txt"));
+		if(!is_file($this->path."ScheduleData.dat")){
+			file_put_contents($this->path."ScheduleData.dat", serialize(array(
+				"debt" => array(),
+				"bank" => array()
+			)));
+		}
+		if(!is_file($this->path."PlayerLang.dat")){
+			file_put_contents($this->path."PlayerLang.dat", serialize(array()));
+		}
+		
+		$this->schedules = unserialize(file_get_contents($this->path."ScheduleData.dat"));
+		$this->playerLang = unserialize(file_get_contents($this->path."PlayerLang.dat"));
+
+		if(!isset($this->playerLang["console"])){
+			$this->getLangFile();
+		}
+		$cmds = array(
+			"setmoney" => "onebone\\economyapi\\commands\\SetMoneyCommand",
+			"seemoney" => "onebone\\economyapi\\commands\\SeeMoneyCommand",
+			"mymoney" => "onebone\\economyapi\\commands\\MyMoneyCommand",
+			"pay" => "onebone\\economyapi\\commands\\PayCommand",
+			"givemoney" => "onebone\\economyapi\\commands\\GiveMoneyCommand",
+			"takedebt" => "onebone\\economyapi\\commands\\TakeDebtCommand",
+			"economys" => "onebone\\economyapi\\commands\\EconomySCommand",
+			"topmoney" => "onebone\\economyapi\\commands\\TopMoneyCommand",
+			"setlang" => "onebone\\economyapi\\commands\\SetLangCommand",
+			"takemoney" => "onebone\\economyapi\\commands\\TakeMoneyCommand",
+			"bank" => "onebone\\economyapi\\commands\\BankCommand",
+			"mydebt" => "onebone\\economyapi\\commands\\MyDebtCommand",
+			"returndebt" => "onebone\\economyapi\\commands\\ReturnDebtCommand",
+			"bankadmin" => "onebone\\economyapi\\commands\\BankAdminCommand",
+			"mystatus" => "onebone\\economyapi\\commands\\MyStatusCommand"
+		);
+		$commandMap = $this->getServer()->getCommandMap();
+		foreach($cmds as $key => $cmd){
+			foreach($this->command->get($key) as $c){
+				$commandMap->register("economyapi", new $cmd($this, $c));
+			}
+		}
+		
+		// getServer().getPluginManager().registerEvents(this, this);
+		$this->getServer()->getPluginManager()->registerEvents($this, $this);
+		$this->convertData();
+		$moneyConfig = new Config($this->path."Money.yml", Config::YAML, array(
+			"version" => 2,
+			"money" => [],
+			"debt" => []
+		));
+		$bankConfig = new Config($this->path."Bank.yml", Config::YAML);
+		
+		if($moneyConfig->get("version")< self::CURRENT_DATABASE_VERSION){ // TODO: This code is too slow. Do optimization.
+			$converter = new DataConverter($this->path."Money.yml", $this->path."Bank.yml");
+			$result = $converter->convertData(self::CURRENT_DATABASE_VERSION);
+			if($result !== false){
+				$this->getLogger()->info("Converted data into new database. Database version : ".self::CURRENT_DATABASE_VERSION);
+			}
+			$moneyConfig = new Config($this->path."Money.yml", Config::YAML);
+			$bankConfig = new Config($this->path."Bank.yml", Config::YAML);
+		}
+		$this->money = $moneyConfig->getAll();
+		$this->bank = $bankConfig->getAll();
+		
+		$this->monetaryUnit = $this->config->get("monetary-unit");
+		
+		$time = $this->config->get("auto-save-interval");
+		if(is_numeric($time)){
+			$interval = $time * 1200;
+			$this->getServer()->getScheduler()->scheduleDelayedRepeatingTask(new CallbackTask([$this, "save"], []), $interval, $interval);
+			$this->getLogger()->notice("Auto save has been set to interval : ".$time." min(s)");
+		}
+		
+		$this->registerList("EconomyAPI");
+	}
+	
+	private function convertData(){
+		$cnt = 0;
+		if(is_file($this->path."MoneyData.yml")){
+			$data = (new Config($this->path."MoneyData.yml", Config::YAML))->getAll();
+			$saveData = array();
+			foreach($data as $player => $money){
+				$saveData["money"][$player] = round($money["money"], 2);
+				$saveData["debt"][$player] = round($money["debt"], 2);
+				++$cnt;
+			}
+			@unlink($this->path."MoneyData.yml");
+			$moneyConfig = new Config($this->path."Money.yml", Config::YAML);
+			$moneyConfig->setAll($saveData);
+			$moneyConfig->save();
+		}
+		if(is_file($this->path."BankData.yml")){
+			$data = (new Config($this->path."BankData.yml", Config::YAML))->getAll();
+			$saveData = array();
+			foreach($data as $player => $money){
+				$saveData["money"][$player] = round($money["money"], 2);
+				++$cnt;
+			}
+			@unlink($this->path."BankData.yml");
+			$bankConfig = new Config($this->path."Bank.yml", Config::YAML);
+			$bankConfig->setAll($saveData);
+			$bankConfig->save();
+		}
+		if($cnt > 0){
+			$this->getLogger()->info(TextFormat::AQUA."Converted $cnt data(m) into new format");
+		}
+	}
+	
+	private function createConfig(){
+		$this->config = new Config($this->path."economy.properties", Config::PROPERTIES, yaml_parse($this->readResource("config.yml")));
+		$this->command = new Config($this->path."command.yml", Config::YAML, yaml_parse($this->readResource("command.yml")));
+	}
+	
+	private function scanResources(){
+		foreach($this->getResources() as $resource){
+			$s = explode(\DIRECTORY_SEPARATOR, $resource);
+			$res = $s[count($s) - 1];
+			if(substr($res, 0, 5) === "lang_"){
+				$this->langRes[substr($res, 5, -5)] = get_object_vars(json_decode($this->readResource($res)));
+			}
+		}
+		$this->langRes["user-define"] = (new Config($this->path."language.properties", Config::PROPERTIES, $this->langRes["def"]))->getAll();
+	}
+
+	/**
+	 * @param string $name
+	 *
+	 * @return bool
+	 */
+	public function registerList($name){
+		if(trim($name) === ""){
+			return false;
+		}
+		if(in_array($name, $this->list)){
+			return false;
+		}else{
+			$this->list[] = $name;
+			return true;
+		}
+	}
+
+	/**
+	 * @param string $name
+	 *
+	 * @return bool
+	 */
+	public function unregisterList($name){
+		foreach($this->list as $key => $n){
+			if($n === $name){
+				unset($this->list[$key]);
+				return true;
+			}
+		}
+		return false;
+	}
+	
+	/**
+	 * @return string[]
+	*/
+	public function getList(){
+		return $this->list;
+	}
+
+	/**
+	 * @param string $key
+	 * @param mixed $default
+	 *
+	 * @return mixed
+	 */
+	public function getConfigurationValue($key, $default = false){
+		if($this->config->exists($key)){
+			return $this->config->get($key);
+		}
+		return $default;
+	}
+	
+	private function readResource($res){
+		$resource = $this->getResource($res);
+		if($resource !== null){
+			return stream_get_contents($resource);
+		}
+		return false;
+	}
+	
+	private function getLangFile(){
+		$lang = $this->config->get("default-lang");
+		if(isset($this->langRes[$lang])){
+			$this->playerLang["console"] = $lang;
+			$this->playerLang["rcon"] = $lang;
+			$this->getLogger()->info(TextFormat::GREEN.$this->getMessage("language-set", "console", array($this->langList[$lang], "%2", "%3", "%4")));
+		}elseif($lang === "user-define"){
+			$this->playerLang["console"] = "user-define";
+			$this->playerLang["rcon"] = "user-define";
+			$this->getLogger()->info(TextFormat::GREEN.$this->getMessage("language-set", "console", array("User Define", "%2", "%3", "%4")));
+		}else{
+			$this->playerLang["console"] = "def";
+			$this->playerLang["rcon"] = "def";
+			$this->getLogger()->info(TextFormat::GREEN.$this->getMessage("language-set", "console", array($this->langList[$lang], "%2", "%3", "%4")));
+		}
+	}
+
+	/**
+	 * @param string $lang
+	 * @param string $target
+	 *
+	 * @return bool
+	 */
+	public function setLang($lang, $target = "console"){
+		if(isset($this->langRes[$lang])){
+			$this->playerLang[strtolower($target)] = $lang;
+			return $lang;
+		}else{
+			$lower = strtolower($lang);
+			foreach($this->langList as $key => $l){
+				if($lower === strtolower($l)){
+					$this->playerLang[strtolower($target)] = $key;
+					return $l;
+				}
+			}
+		}
+		return false;
+	}
+	
+	/**
+	 * @return array
+	*/
+	public function getLangList(){
+		return $this->langList;
+	}
+	
+	/**
+	 * @return array
+	*/
+	public function getLangResource(){
+		return $this->langRes;
+	}
+	
+	/**
+	 * @param string|Player $player
+	 *
+	 * @return string|boolean
+	*/
+	public function getPlayerLang($player){
+		if($player instanceof Player){
+			$player = $player->getName();
+		}
+		$player = strtolower($player);
+		if(isset($this->playerLang[$player])){
+			return $this->playerLang[$player];
+		}else{
+			return false;
+		}
+	}
+	
+	/**
+	 * @param Player|string $player
+	 * @param float $amount
+	 * @param bool $force
+	 * @param string $issuer
+	 *
+	 * @return int
+	*/
+	public function addDebt($player, $amount, $force = false, $issuer = "external"){
+		if($amount <= 0){
+			return self::RET_INVALID;
+		}
+		if($player instanceof Player){
+			$player = $player->getName();
+		}
+		$player = strtolower($player);
+		$amount = round($amount, 2);
+		if(isset($this->money["debt"][$player])){
+			$debt = $this->money["debt"][$player];
+			
+			if(($debt + $amount > $this->config->get("debt-limit")) and $force === false){
+				return self::RET_ERROR_1;
+			}
+			if((($amount > $this->config->get("once-debt-limit")) and $force === false)){
+				return self::RET_ERROR_2;
+			}
+			$ev = new AddDebtEvent($this, $player, $amount, $issuer);
+			$this->getServer()->getPluginManager()->callEvent($ev);
+			if($force === false and $ev->isCancelled()){
+				return self::RET_CANCELLED;
+			}
+			$this->money["debt"][$player] += $amount;
+
+			if(!isset($this->schedules["debt"][$player])){
+				$this->scheduleId["debt"][$player] = $this->getServer()->getScheduler()->scheduleDelayedTask(new CallbackTask([$this, "debtScheduler"], [$player]), $this->config->get("time-for-increase-debt")*1200)->getTaskId();
+				$this->schedules["debt"][$player] = $this->config->get("time-for-increase-debt") * 60;
+				$this->lastActivity["debt"][$player] = time();
+			}
+			$this->getServer()->getPluginManager()->callEvent(new DebtChangedEvent($this, $player, $this->money["debt"][$player], $issuer));
+			return self::RET_SUCCESS;
+		}else{
+			return self::RET_NOT_FOUND;
+		}
+	}
+	
+	/**
+	 * @param Player|string $player
+	 * @param float $amount
+	 * @param bool $force
+	 * @param string $issuer
+	 *
+	 * @return int
+	*/
+	public function reduceDebt($player, $amount, $force = false, $issuer = "external"){
+		if($player instanceof Player){
+			$player = $player->getName();
+		}
+		$player = strtolower($player);
+		
+		$amount = round($amount, 2);
+		if(isset($this->money["debt"][$player])){
+			$debt = $this->money["debt"][$player];
+			$money = $this->money["money"][$player];
+			if($amount <= 0 or $debt < $amount or $money < $amount){
+				return self::RET_INVALID;
+			}
+			$ev = new ReduceDebtEvent($this, $player, $amount, $issuer);
+			$this->getServer()->getPluginManager()->callEvent($ev);
+			if($force === false and $ev->isCancelled()){
+				return self::RET_CANCELLED;
+			}
+			$this->money["debt"][$player] -= $amount;
+			if($this->money["debt"][$player] <= 0){
+				$this->getServer()->getScheduler()->cancelTask($this->scheduleId["debt"][$player]);
+				$this->lastActivity["debt"][$player] = null;
+				$this->schedules["debt"][$player] = null;
+				unset($this->lastActivity["debt"][$player], $this->schedules["debt"][$player], $this->scheduleId["debt"][$player]);
+			}
+			$this->getServer()->getPluginManager()->callEvent(new DebtChangedEvent($this, $player, $this->money["debt"][$player], $issuer));
+			return self::RET_SUCCESS;
+		}else{
+			return self::RET_NOT_FOUND;
+		}
+	}
+	
+	/**
+	 * @param Player|string $player
+	 * @param float $amount
+	 * @param bool $force
+	 * @param string $issuer
+	 *
+	 * @return int
+	*/
+	public function addBankMoney($player, $amount, $force = false, $issuer = "external"){
+		if($amount <= 0){
+			return self::RET_INVALID;
+		}
+		if($player instanceof Player){
+			$player = $player->getName();
+		}
+		$player = strtolower($player);
+		
+		$amount = round($amount, 2);
+		if(isset($this->bank["money"][$player])){
+			$ev = new BankAddMoneyEvent($this, $player, $amount, $issuer);
+			$this->getServer()->getPluginManager()->callEvent($ev);
+			if($force === false and $ev->isCancelled()){
+				return self::RET_CANCELLED;
+			}
+			$this->bank["money"][$player] += $amount;
+
+			if(!isset($this->schedules["bank"][$player])){
+				$this->schedules["bank"][$player] = $this->config->get("time-for-increase-money") * 1200;
+				$this->scheduleId["bank"][$player] = $this->getServer()->getScheduler()->scheduleDelayedTask(new CallbackTask([$this, "bankScheduler"], [$player]), $this->config->get("time-for-increase-money")*1200)->getTaskId();
+				$this->lastActivity["bank"][$player] = time();
+			}
+			$this->getServer()->getPluginManager()->callEvent(new BankMoneyChangedEvent($this, $player, $this->bank["money"][$player], $issuer));
+			return self::RET_SUCCESS;
+		}else{
+			return self::RET_NOT_FOUND;
+		}
+	}
+	
+	/**
+	 * @param Player|string $player
+	 * @param float $amount
+	 * @param bool $force
+	 * @param string $issuer
+	 *
+	 * @return int
+	*/
+	public function reduceBankMoney($player, $amount, $force = false, $issuer = "external"){
+		if($player instanceof Player){
+			$player = $player->getName();
+		}
+		$player = strtolower($player);
+		
+		$amount = round($amount, 2);
+		if(isset($this->bank["money"][$player])){
+			if($amount <= 0 or $amount > $this->bank["money"][$player]){
+				return self::RET_INVALID;
+			}
+			$ev = new BankReduceMoneyEvent($this, $player, $amount, $issuer);
+			$this->getServer()->getPluginManager()->callEvent($ev);
+			if($force === false and $ev->isCancelled()){
+				return self::RET_CANCELLED;
+			}
+			$this->bank["money"][$player] -= $amount;
+			if($this->bank["money"][$player] <= 0){
+				$this->getServer()->getScheduler()->cancelTask($this->scheduleId["bank"][$player]);
+				$this->schedules["bank"][$player] = null;
+				$this->lastActivity["bank"][$player] = null;
+				unset($this->schedules["bank"][$player], $this->lastActivity["bank"][$player], $this->scheduleId["bank"][$player]);
+			}
+			$this->getServer()->getPluginManager()->callEvent(new BankMoneyChangedEvent($this, $player, $this->bank["money"][$player], $issuer));
+			return self::RET_SUCCESS;
+		}else{
+			return self::RET_NOT_FOUND;
+		}
+	}
+	
+	/**
+	 * @return array
+	*/
+	public function getAllMoney(){
+		return $this->money;
+	}
+	
+	/**
+	 * @return array
+	*/
+	public function getAllBankMoney(){
+		return $this->bank;
+	}
+	
+	/**
+	  * @return string
+	  */
+	 public function getMonetaryUnit(){
+		return $this->monetaryUnit;
+	 }
+	
+	/**
+	 * @param string $key
+	 * @param Player|string $player
+	 * @param array $value
+	 *
+	 * @return string
+	*/
+	public function getMessage($key, $player = "console", array $value = array("%1", "%2", "%3", "%4")){
+		if($player instanceof Player){
+			$player = $player->getName();
+		}
+		$player = strtolower($player);
+		
+		if(isset($this->playerLang[$player]) and isset($this->langRes[$this->playerLang[$player]][$key])){
+			return str_replace(array("%MONETARY_UNIT%", "%1", "%2", "%3", "%4"), array($this->monetaryUnit, $value[0], $value[1], $value[2], $value[3]), $this->langRes[$this->playerLang[$player]][$key]);
+		}elseif(isset($this->langRes["def"][$key])){
+			return str_replace(array("%MONETARY_UNIT%", "%1", "%2", "%3", "%4"), array($this->monetaryUnit, $value[0], $value[1], $value[2], $value[3]), $this->langRes["def"][$key]);
+		}else{
+			return "Couldn't find message resource";
+		}
+	}
+	
+	/**
+	 * @param Player|string $player
+	 *
+	 * @return boolean
+	*/
+	public function accountExists($player){
+		if($player instanceof Player){
+			$player = $player->getName();
+		}
+		$player = strtolower($player);
+		
+		return isset($this->money["money"][$player]) === true;
+	}
+
+	/**
+	 * @param Player|string $player
+	 * @param bool|float $default_money
+	 * @param bool|float $default_debt
+	 * @param bool|float $default_bank_money
+	 * @param bool $force
+	 *
+	 * @return boolean
+	 */
+	public function createAccount($player, $default_money = false, $default_debt = false, $default_bank_money = false, $force = false){
+		if($player instanceof Player){
+			$player = $player->getName();
+		}
+		$player = strtolower($player);
+		
+		if(!isset($this->money["money"][$player])){
+			$this->getServer()->getPluginManager()->callEvent(($ev = new CreateAccountEvent($this, $player, $default_money, $default_debt, $default_bank_money, "EconomyAPI")));
+			if(!$ev->isCancelled() and $force === false){
+				$this->money["money"][$player] = ($default_money === false ? $this->config->get("default-money") : $default_money);
+				$this->money["debt"][$player] = ($default_debt === false ? $this->config->get("default-debt") : $default_debt);
+				$this->bank["money"][$player] = ($default_bank_money === false ? $this->config->get("default-bank-money") : $default_bank_money);
+				return true;
+			}
+		}
+		return false;
+	}
+	
+	/**
+	 * @param Player|string $player
+	 *
+	 * @return boolean
+	*/
+	public function removeAccount($player){
+		if($player instanceof Player){
+			$player = $player->getName();
+		}
+		$player = strtolower($player);
+		
+		if(isset($this->money["money"][$player])){
+			$this->money["money"][$player] = null;
+			$this->money["debt"][$player] = null;
+			$this->bank["money"][$player] = null;
+			unset($this->money["money"][$player], $this->money["debt"][$player], $this->bank["money"][$player]);
+
+			if(isset($this->schedules["debt"][$player])){
+				$this->getServer()->getScheduler()->cancelTask($this->scheduleId["debt"][$player]);
+				$this->schedules["debt"][$player] = null;
+				$this->scheduleId["debt"][$player] = null;
+				unset($this->schedules["debt"][$player], $this->scheduleId["debt"][$player]);
+			}
+			if(isset($this->schedules["bank"][$player])){
+				$this->getServer()->getScheduler()->cancelTask($this->scheduleId["bank"][$player]);
+				$this->schedules["bank"][$player] = null;
+				$this->scheduleId["bank"][$player] = null;
+				unset($this->schedules["bank"][$player], $this->scheduleId["bank"][$player]);
+			}
+			$p = $this->getServer()->getPlayerExact($player);
+			if($p instanceof Player){
+				$p->kick("Your account have been removed.");
+			}
+			return true;
+		}
+		return false;
+	}
+	
+	/**
+	 * @param Player|string $player
+	 *
+	 * @return boolean
+	*/
+	public function bankAccountExists($player){
+		if($player instanceof Player){
+			$player = $player->getName();
+		}
+		$player = strtolower($player);
+		
+		return isset($this->bank["money"][$player]);
+	}
+	
+	/**
+	 * @param Player|string $player
+	
+	 * @return boolean|float
+	*/
+	public function myMoney($player){ // To identify the result, use '===' operator
+		if($player instanceof Player){
+			$player = $player->getName();
+		}
+		$player = strtolower($player);
+		
+		if(!isset($this->money["money"][$player])){
+			return false;
+		}
+		return $this->money["money"][$player];
+	}
+	
+	/**
+	 * @param Player|string $player
+	
+	 * @return boolean|float
+	*/
+	public function myDebt($player){ // To identify the result, use '===' operator
+		if($player instanceof Player){
+			$player = $player->getName();
+		}
+		$player = strtolower($player);
+		
+		if(!isset($this->money["debt"][$player])){
+			return false;
+		}
+		return $this->money["debt"][$player];
+	}
+	
+	/**
+	 * @param Player|string $player
+	 *
+	 * @return boolean|float
+	*/
+	public function myBankMoney($player){ // To identify the result, use '===' operator
+		if($player instanceof Player){
+			$player = $player->getName();
+		}
+		$player = strtolower($player);
+		
+		if(!isset($this->bank["money"][$player])){
+			return false;
+		}
+		return $this->bank["money"][$player];
+	}
+
+	/**
+	 * @param Player|string $player
+	 * @param float $amount
+	 * @param bool $force
+	 * @param string $issuer
+	 *
+	 * @return int
+	 */
+	public function addMoney($player, $amount, $force = false, $issuer = "external"){
+		if($amount <= 0 or !is_numeric($amount)){
+			return self::RET_INVALID;
+		}
+		
+		if($player instanceof Player){
+			$player = $player->getName();
+		}
+		$player = strtolower($player);
+		
+		$amount = round($amount, 2);
+		if(isset($this->money["money"][$player])){
+			$amount = min($this->config->get("max-money"), $amount);
+			$event = new AddMoneyEvent($this, $player, $amount, $issuer);
+			$this->getServer()->getPluginManager()->callEvent($event);
+			if($force === false and $event->isCancelled()){
+				return self::RET_CANCELLED;
+			}
+			$this->money["money"][$player] += $amount;
+			$this->getServer()->getPluginManager()->callEvent(new MoneyChangedEvent($this, $player, $this->money["money"][$player], $issuer));
+			return self::RET_SUCCESS;
+		}else{
+			return self::RET_NOT_FOUND;
+		}
+	}
+
+	/**
+	 * @param Player|string $player
+	 * @param float $amount
+	 * @param bool $force
+	 * @param string $issuer
+	 *
+	 * @return int
+	 */
+	public function reduceMoney($player, $amount, $force = false, $issuer = "external"){
+		if($amount <= 0 or !is_numeric($amount)){
+			return self::RET_INVALID;
+		}
+		
+		if($player instanceof Player){
+			$player = $player->getName();
+		}
+		$player = strtolower($player);
+		
+		$amount = round($amount, 2);
+		if(isset($this->money["money"][$player])){
+			if($this->money["money"][$player] - $amount < 0){
+				return self::RET_INVALID;
+			}
+			$event = new ReduceMoneyEvent($this, $player, $amount, $issuer);
+			$this->getServer()->getPluginManager()->callEvent($event);
+			if($force === false and $event->isCancelled()){
+				return self::RET_CANCELLED;
+			}
+			$this->money["money"][$player] -= $amount;
+			$this->getServer()->getPluginManager()->callEvent(new MoneyChangedEvent($this, $player, $this->money["money"][$player], $issuer));
+			return self::RET_SUCCESS;
+		}else{
+			return self::RET_NOT_FOUND;
+		}
+	}
+
+	/**
+	 * @param Player|string $player
+	 * @param float $money
+	 * @param bool $force
+	 * @param string $issuer
+	 *
+	 * @return int
+	 */
+	public function setMoney($player, $money, $force = false, $issuer = "external"){
+		if($money < 0 or !is_numeric($money)){
+			return self::RET_INVALID;
+		}
+		
+		if($player instanceof Player){
+			$player = $player->getName();
+		}
+		$player = strtolower($player);
+		
+		$money = round($money, 2);
+		if(isset($this->money["money"][$player])){
+			$money = min($this->config->get("max-money"), $money);
+			$ev = new SetMoneyEvent($this, $player, $money, $issuer);
+			$this->getServer()->getPluginManager()->callEvent($ev);
+			if($force === false and $ev->isCancelled()){
+				return self::RET_CANCELLED;
+			}
+			$this->money["money"][$player] = $money;
+			$this->getServer()->getPluginManager()->callEvent(new MoneyChangedEvent($this, $player, $this->money["money"][$player], $issuer));
+			return self::RET_SUCCESS;
+		}else{
+			return self::RET_NOT_FOUND;
+		}
+	}
+	
+	public function onDisable(){
+		$this->save();
+	}
+	
+	public function save(){
+		$moneyConfig = new Config($this->path."Money.yml", Config::YAML);
+		$bankConfig = new Config($this->path."Bank.yml", Config::YAML);
+		$moneyConfig->setAll($this->money);
+		$moneyConfig->save();
+		$bankConfig->setAll($this->bank);
+		$bankConfig->save();
+		file_put_contents($this->path."ScheduleData.dat", serialize($this->schedules));
+		file_put_contents($this->path."PlayerLang.dat", serialize($this->playerLang));
+	}
+	
+	public function onQuitEvent(PlayerQuitEvent $event){
+		$username = strtolower($event->getPlayer()->getName());
+		$now = time();
+		if(isset($this->schedules["debt"][$username])){
+			$this->schedules["debt"][$username] = ($this->schedules["debt"][$username] - $now + $this->lastActivity["debt"][$username]);
+			$this->getServer()->getScheduler()->cancelTask($this->scheduleId["debt"][$username]);
+			unset($this->scheduleId["debt"][$username]);
+		}
+		if(isset($this->schedules["bank"][$username])){
+			$this->schedules["bank"][$username] = ($this->schedules["bank"][$username] - $now + $this->lastActivity["bank"][$username]);
+			$this->getServer()->getScheduler()->cancelTask($this->scheduleId["bank"][$username]);
+			unset($this->scheduleId["bank"][$username]);
+		}
+		
+		$this->lastActivity["bank"][$username] = null;
+		$this->lastActivity["debt"][$username] = null;
+		unset($this->lastActivity["bank"][$username], $this->lastActivity["debt"][$username]);
+	}
+	
+	public function onLoginEvent(PlayerLoginEvent $event){
+		$username = strtolower($event->getPlayer()->getName());
+		if(!isset($this->money["money"][$username])){
+			$this->getServer()->getPluginManager()->callEvent(($ev = new CreateAccountEvent($this, $username, $this->config->get("default-money"), $this->config->get("default-debt"), null, "EconomyAPI")));
+			$this->money["money"][$username] = round($ev->getDefaultMoney(), 2);
+			$this->money["debt"][$username] = round($ev->getDefaultDebt(), 2);
+		}
+		if(!isset($this->bank["money"][$username])){
+			$this->getServer()->getPluginManager()->callEvent(($ev = new CreateAccountEvent($this, $username, null, null, $this->config->get("default-bank-money"), "EconomyAPI")));
+			$this->bank["money"][$username] = round($ev->getDefaultBankMoney(), 2);
+		}
+		if(!isset($this->playerLang[$username])){
+			$this->setLang($this->config->get("default-lang"), $username);
+		}
+
+		if(isset($this->schedules["debt"][$username])){
+			$this->scheduleId["debt"][$username] = $this->getServer()->getScheduler()->scheduleDelayedTask(new CallbackTask(array($this, "debtScheduler"), [$username]), $this->schedules["debt"][$username]*20)->getTaskId();
+			$this->lastActivity["debt"][$username] = time();
+		}
+		if(isset($this->schedules["bank"][$username])){
+			$this->scheduleId["bank"][$username] = $this->getServer()->getScheduler()->scheduleDelayedTask(new CallbackTask([$this, "bankScheduler"], [$username]), $this->schedules["bank"][$username]*20)->getTaskId();
+			$this->lastActivity["bank"][$username] = time();
+		}
+	}
+
+	/**
+	 * This function is non-API part. Do not call this function.
+	 */
+	public function bankScheduler($username){
+		$player = $this->getServer()->getPlayerExact($username);
+		if(!$player instanceof Player){
+			return;
+		}
+
+		if($this->bank["money"][$username] <= 0){
+			$this->lastActivity["bank"][$username] = null;
+			$this->schedules["bank"][$username] = null;
+			$this->scheduleId["bank"][$username] = null;
+			unset($this->schedules["bank"][$username], $this->lastActivity["bank"][$username], $this->scheduleId["bank"][$username]);
+			return;
+		}
+		$per = $this->getConfigurationValue("bank-increase-money-rate");
+		$increase = ($this->myBankMoney($player) * ($per / 100));
+		$this->addBankMoney($player, $increase, true, "bankScheduler");
+		$player->sendMessage($this->getMessage("bank-credit-increase", $player->getName()));
+		$this->lastActivity["bank"][$username] = time();
+		$this->schedules["debt"][$username] = $this->config->get("time-for-increase-money") * 60;
+		$this->scheduleId["bank"][$username] = $this->getServer()->getScheduler()->scheduleDelayedTask(new CallbackTask([$this, "bankScheduler"], [$username]), ($this->config->get("time-for-increase-money") * 1200))->getTaskId();
+	}
+
+	/**
+	 * This function is non-API part. Do not call this function.
+	 */
+	public function debtScheduler($username){
+		$player = $this->getServer()->getPlayerExact($username);
+		if(!$player instanceof Player){
+			return;
+		}
+		if($this->money["debt"][$username] <= 0){
+			$this->lastActivity["debt"][$username] = null;
+			$this->schedules["debt"][$username] = null;
+			$this->scheduleId["debt"][$username] = null;
+			unset($this->lastActivity["debt"][$username], $this->schedules["debt"][$username], $this->scheduleId["debt"][$username]);
+			return;
+		}
+		$per = $this->getConfigurationValue("percent-of-increase-debt");
+		$increase = ($this->myDebt($player) * ($per / 100));
+		$this->addDebt($player, $increase, true, "DebtScheduler");
+		$player->sendMessage($this->getMessage("debt-increase", $player, array($this->myDebt($player), "", "", "")));
+
+		$this->lastActivity["debt"][$username] = time();
+		$this->schedules["debt"][$username] = $this->config->get("time-for-increase-debt") * 60;
+		$this->scheduleId["debt"][$username] = $this->getServer()->getScheduler()->scheduleDelayedTask(new CallbackTask(array($this, "debtScheduler"), array($username)), ($this->config->get("time-for-increase-debt") * 1200))->getTaskId();
+	}
+	
+	/**
+	 * @return string
+	*/
+	public function __toString(){
+		return "EconomyAPI (accounts:".count($this->money).", bank: ".count($this->money).")";
+	}
+}# EconomyS configuration resource
+monetary-unit: "$"
+once-debt-limit: 100
+debt-limit: 500
+add-op-at-rank: false
+default-money: 1000
+default-debt: 0
+max-money: 9999999999
+time-for-increase-debt: 10
+percent-of-increase-debt: 5
+default-bank-money: 0
+time-for-increase-money: 10
+bank-increase-money-rate: 5
+debug: true
+default-lang: user-define
+auto-save-interval: 10setmoney:
+- setmoney
+seemoney:
+- seemoney
+mymoney:
+- mymoney
+pay:
+- pay
+givemoney:
+- givemoney
+takedebt:
+- takedebt
+economys:
+- economys
+topmoney:
+- topmoney
+setlang:
+- setlang
+takemoney:
+- takemoney
+bank:
+- bank
+mydebt:
+- mydebt
+returndebt:
+- returndebt
+bankadmin:
+- bankadmin
+mystatus:
+- mystatus{"language":"ch","language-set":"\u8bed\u8a00\u88ab\u8bbe\u7f6e\u4e3a %1","request-cancelled":"\u4f60\u7684\u8bf7\u6c42\u5df2\u88ab\u53d6\u6d88","player-not-connected":"\u73a9\u5bb6 %1 \u5f53\u524d\u4e0d\u5728\u670d\u52a1\u5668\u4e0a","player-never-connected":"\u670d\u52a1\u5668\u4e2d\u4e0d\u5b58\u5728\u73a9\u5bb6 %1","bank-credit-increase":"\u94f6\u884c\u5229\u606f\u5df2\u53d1","debt-increase":"\u4f60\u7684\u8d37\u6b3e\u5229\u606f\u5df2\u589e\u52a0\uff0c\u5f53\u524d\u6b20\u6b3e\u91d1\u989d: %MONETARY_UNIT%%1","topmoney-format":"[%1] %2: %3","takemoney-must-be-number":"\u91d1\u989d\u5fc5\u987b\u662f\u6709\u6548\u6570\u5b57","takemoney-invalid-number":"\u65e0\u6548\u7684\u6570\u5b57","takemoney-player-lack-of-money":"%1 \u6ca1\u6709 %MONETARY_UNIT%%2 \u5143\u94b1. %1 \u5269\u4f59\u91d1\u989d: %MONETARY_UNIT%%3","takemoney-money-taken":"\u4f60\u7684 %MONETARY_UNIT%%1 \u5143\u94b1\u5df2\u7ecf\u88ab\u7ba1\u7406\u5458\u5077\u8d70~ TAT","takemoney-took-money":"\u5df2\u7ecf\u62ff\u8d70 %1 \u7684 %MONETARY_UNIT%%2 \u5143\u94b1","takemoney-failed":"\u5077\u94b1\u5931\u8d25~ TAT","givemoney-must-be-number":"\u91d1\u989d\u5fc5\u987b\u662f\u6709\u6548\u6570\u5b57","givemoney-invalid-number":"\u65e0\u6548\u7684\u6570\u5b57","givemoney-money-given":"\u6709\u4eba\u7ed9\u4f60\u4e86 %MONETARY_UNIT%%1 \u5143\u94b1","givemoney-gave-money":"\u5df2\u7ecf\u7ed9 %2 \u4e86%MONETARY_UNIT%%1 \u5143\u94b1","seemoney-seemoney":"\u73a9\u5bb6 %1 \u7684\u91d1\u94b1: %2","setmoney-setmoney":"\u73a9\u5bb6 %1 \u7684\u91d1\u94b1\u5df2\u7ecf\u88ab\u8bbe\u5b9a\u4e3a %MONETARY_UNIT%%2 \u5143\u94b1","setmoney-failed":"\u8bbe\u5b9a\u5931\u8d25~\u672a\u77e5\u9519\u8bef~ TAT","setmoney-invalid-number":"%MONETARY_UNIT%%1 \u662f\u65e0\u6548\u7684\u91d1\u989d","mymoney-mymoney":"\u4f60\u8eab\u4e0a\u7684\u94b1: %MONETARY_UNIT%%1","mydebt-mydebt":"\u4f60\u7684\u6b20\u503a: %MONETARY_UNIT%%1","mystatus-show":"\u4f60\u7684\u50a8\u84c4\u72b6\u6001: %1% | \u4f60\u7684\u8d37\u6b3e\u72b6\u6001: %2%","takedebt-must-bigger-than-zero":"\u4f60\u4e0d\u80fd\u501f\u5c11\u4e8e %MONETARY_UNIT%0 \u5143\u94b1\u7684\u503a","takedebt-over-range-once":"\u4f60\u4e0d\u80fd\u4e00\u6b21\u8d37\u6b3e\u8d85\u8fc7 %MONETARY_UNIT%%1 \u5143\u94b1\uff0c\u5355\u7b14\u6700\u5927\u91d1\u989d: %MONETARY_UNIT%%2","takedebt-over-range":"\u4f60\u4e0d\u80fd\u8d37\u6b3e %MONETARY_UNIT%%1 \u5143\u94b1\uff0c\u6700\u9ad8\u8d37\u6b3e\u91d1\u989d: %MONETARY_UNIT%%2","takedebt-takedebt":"\u4f60\u5df2\u7ecf\u8d37\u6b3e %MONETARY_UNIT%%1 \u5143\u94b1","takedebt-failed":"\u8d37\u6b3e\u5931\u8d25~ TAT","returndebt-must-bigger-than-zero":"\u4f60\u4e0d\u80fd\u8fd8\u6b3e\u5c11\u4e8e %MONETARY_UNIT%0 \u5143\u94b1","returndebt-dont-have-debt":"\u4f60\u6ca1\u6709 %MONETARY_UNIT%%1 \u5143\u94b1\u7684\u503a\uff0c\u6b20\u6b3e\u91d1\u989d: %MONETARY_UNIT%%2","returndebt-dont-have-money":"\u4f60\u6ca1\u6709 %MONETARY_UNIT%%1 \u5143\u94b1\uff0c\u5269\u4f59\u91d1\u989d: %MONETARY_UNIT%%2","returndebt-returndebt":"\u5df2\u7ecf\u8fd8\u6b3e %MONETARY_UNIT%%1 \u5143\u94b1\uff0c\u5269\u4f59\u8d37\u6b3e: %MONETARY_UNIT%%2","returndebt-failed":"\u8fd8\u6b3e\u5931\u8d25~ TAT","bank-deposit-must-bigger-than-zero":"\u5b58\u6b3e\u91d1\u989d\u5fc5\u987b\u5927\u4e8e %MONETARY_UNIT%0 \u5143\u94b1","bank-deposit-dont-have-money":"\u4f60\u6ca1\u6709 %MONETARY_UNIT%%1 \u5143\u94b1","bank-deposit-success":"\u6210\u529f\u5b58\u6b3e %MONETARY_UNIT%%1 \u5143","bank-deposit-failed":"\u5b58\u6b3e\u5931\u8d25~ TAT","bank-withdraw-must-bigger-than-zero":"\u53d6\u6b3e\u91d1\u989d\u5fc5\u987b\u5927\u4e8e %MONETARY_UNIT%0 \u5143\u94b1","bank-withdraw-lack-of-credit":"\u4f60\u94f6\u884c\u8d26\u6237\u91cc\u6ca1\u6709 %MONETARY_UNIT%%1 \u5143\u94b1","bank-withdraw-success":"\u6210\u529f\u53d6\u6b3e %MONETARY_UNIT%%1 \u5143","bank-withdraw-failed":"\u53d6\u6b3e\u5931\u8d25~ TAT","bank-mymoney":"\u4f60\u94f6\u884c\u8d26\u6237\u4e2d\u6709 %MONETARY_UNIT%%1 \u5143\u94b1","bank-hismoney":"%1 \u7684\u8d26\u6237\u4e2d\u6709 %MONETARY_UNIT%2 \u5143\u94b1","bank-takemoney-must-bigger-than-zero":"\u62ff\u94b1\u91d1\u989d\u5fc5\u987b\u5927\u4e8e %MONETARY_UNIT%0 \u5143\u94b1","bank-takemoney-done":"\u6210\u529f\u62ff\u8d70 %1 \u7684 %MONETARY_UNIT%%2 \u5143\u94b1","bank-takemoney-no-money":"%1 \u6ca1\u6709 %MONETARY_UNIT%%2 \u5143\u94b1","bank-givemoney-must-bigger-than-zero":"\u9001\u94b1\u91d1\u989d\u5fc5\u987b\u5927\u4e8e %MONETARY_UNIT%0 \u5143\u94b1","bank-givemoney-done":"\u5df2\u9001\u7ed9 %1 \u4e86 %MONETARY_UNIT%%2 \u5143\u94b1"}{"language":"en","language-set":"Language set to %1 by onebone","request-cancelled":"Your request was cancelled","player-not-connected":"Player %1 is not in server","player-never-connected":"Player %1 was never seen in this server","bank-credit-increase":"Your bank credit have been increased","debt-increase":"Your debt have been increase. Your debt : %MONETARY_UNIT%%1","topmoney-format":"[%1] %2: %3","takemoney-must-be-number":"Amount must be number","takemoney-invalid-number":"Invalid number","takemoney-player-lack-of-money":"%1 does not have %MONETARY_UNIT%%2. %1's money : %MONETARY_UNIT%%3","takemoney-money-taken":"Your %MONETARY_UNIT%%1 have been taken","takemoney-took-money":"Has been took %1's money %MONETARY_UNIT%%2","takemoney-failed":"You have failed to take money","givemoney-must-be-number":"Amount must be number","givemoney-invalid-number":"Invalid number","givemoney-money-given":"You have been earned %MONETARY_UNIT%%1","givemoney-gave-money":"Has been gave %MONETARY_UNIT%%1 to %2","seemoney-seemoney":"Player %1's money : %2","setmoney-setmoney":"Player %1's money has been setted to %MONETARY_UNIT%%2","setmoney-failed":"Failed setting money due to unknown error","setmoney-invalid-number":"%MONETARY_UNIT%%1 is invalid amount","mymoney-mymoney":"Your money : %MONETARY_UNIT%%1","mydebt-mydebt":"Your debt : %MONETARY_UNIT%%1","mystatus-show":"My money status : %1% | My debt status : %2%","takedebt-must-bigger-than-zero":"You can't take debt less than %MONETARY_UNIT%0","takedebt-over-range-once":"You can't borrow %MONETARY_UNIT%%1 at once. Debt limit : %MONETARY_UNIT%%2","takedebt-over-range":"You can't borrow %MONETARY_UNIT%%1. Debt limit : %MONETARY_UNIT%%2","takedebt-takedebt":"You have took debt %MONETARY_UNIT%%1","takedebt-failed":"Taking debt was failed due to unknown error","returndebt-must-bigger-than-zero":"You can't return debt less than %MONETARY_UNIT%0","returndebt-dont-have-debt":"You don't have %MONETARY_UNIT%%1 of debt. Your debt : %MONETARY_UNIT%%2","returndebt-dont-have-money":"You don't have %MONETARY_UNIT%%1 of money. Your money : %MONETARY_UNIT%%2","returndebt-returndebt":"Has been returned %MONETARY_UNIT%%1 of debt. Your debt : %MONETARY_UNIT%%2","returndebt-failed":"Failed returning debt due to unknown error","bank-deposit-must-bigger-than-zero":"Money must bigger than %MONETARY_UNIT%0","bank-deposit-dont-have-money":"You don't have money to deposit %MONETARY_UNIT%%1","bank-deposit-success":"Has been deposited %MONETARY_UNIT%%1","bank-deposit-failed":"Failed deposit due to unknown error","bank-withdraw-must-bigger-than-zero":"Money must bigger than %MONETARY_UNIT%0","bank-withdraw-lack-of-credit":"You don't have %MONETARY_UNIT%%1 of money in your bank account","bank-withdraw-success":"You've been withdrew %MONETARY_UNIT%%1","bank-withdraw-failed":"Failed withdraw due to unknown error","bank-mymoney":"You have %MONETARY_UNIT%%1 in your account","bank-hismoney":"%1 has %MONETARY_UNIT%%2 in his account","bank-takemoney-must-bigger-than-zero":"You can't take money smaller than %MONETARY_UNIT%0","bank-takemoney-done":"Has been took %1's %MONETARY_UNIT%%2.","bank-takemoney-no-money":"%1 doesn't have %MONETARY_UNIT%%2.","bank-givemoney-must-bigger-than-zero":"You can't give money smaller than %MONETARY_UNIT%0","bank-givemoney-done":"Gave %MONETARY_UNIT%%2 to %1"}{"language":"en","language-set":"Language set to %1 by onebone","request-cancelled":"Your request was cancelled","player-not-connected":"Player %1 is not in server","player-never-connected":"Player %1 was never seen in this server","bank-credit-increase":"Your bank credit have been increased","debt-increase":"Your debt have been increase. Your debt : %MONETARY_UNIT%%1","topmoney-format":"[%1] %2: %3","takemoney-must-be-number":"Amount must be number","takemoney-invalid-number":"Invalid number","takemoney-player-lack-of-money":"%1 does not have %MONETARY_UNIT%%2. %1's money : %MONETARY_UNIT%%3","takemoney-money-taken":"Your %MONETARY_UNIT%%1 have been taken","takemoney-took-money":"Has been took %1's money %MONETARY_UNIT%%2","takemoney-failed":"You have failed to take money","givemoney-must-be-number":"Amount must be number","givemoney-invalid-number":"Invalid number","givemoney-money-given":"You have been earned %MONETARY_UNIT%%1","givemoney-gave-money":"Has been gave %MONETARY_UNIT%%1 to %2","seemoney-seemoney":"Player %1's money : %2","setmoney-setmoney":"Player %1's money has been setted to %MONETARY_UNIT%%2","setmoney-failed":"Failed setting money due to unknown error","setmoney-invalid-number":"%MONETARY_UNIT%%1 is invalid amount","mymoney-mymoney":"Your money : %MONETARY_UNIT%%1","mydebt-mydebt":"Your debt : %MONETARY_UNIT%%1","mystatus-show":"My money status : %1% | My debt status : %2%","takedebt-must-bigger-than-zero":"You can't take debt less than %MONETARY_UNIT%0","takedebt-over-range-once":"You can't borrow %MONETARY_UNIT%%1 at once. Debt limit : %MONETARY_UNIT%%2","takedebt-over-range":"You can't borrow %MONETARY_UNIT%%1. Debt limit : %MONETARY_UNIT%%2","takedebt-takedebt":"You have took debt %MONETARY_UNIT%%1","takedebt-failed":"Taking debt was failed due to unknown error","returndebt-must-bigger-than-zero":"You can't return debt less than %MONETARY_UNIT%0","returndebt-dont-have-debt":"You don't have %MONETARY_UNIT%%1 of debt. Your debt : %MONETARY_UNIT%%2","returndebt-dont-have-money":"You don't have %MONETARY_UNIT%%1 of money. Your money : %MONETARY_UNIT%%2","returndebt-returndebt":"Has been returned %MONETARY_UNIT%%1 of debt. Your debt : %MONETARY_UNIT%%2","returndebt-failed":"Failed returning debt due to unknown error","bank-deposit-must-bigger-than-zero":"Money must bigger than %MONETARY_UNIT%0","bank-deposit-dont-have-money":"You don't have money to deposit %MONETARY_UNIT%%1","bank-deposit-success":"Has been deposited %MONETARY_UNIT%%1","bank-deposit-failed":"Failed deposit due to unknown error","bank-withdraw-must-bigger-than-zero":"Money must bigger than %MONETARY_UNIT%0","bank-withdraw-lack-of-credit":"You don't have %MONETARY_UNIT%%1 of money in your bank account","bank-withdraw-success":"You've been withdrew %MONETARY_UNIT%%1","bank-withdraw-failed":"Failed withdraw due to unknown error","bank-mymoney":"You have %MONETARY_UNIT%%1 in your account","bank-hismoney":"%1 has %MONETARY_UNIT%%2 in his account","bank-takemoney-must-bigger-than-zero":"You can't take money smaller than %MONETARY_UNIT%0","bank-takemoney-done":"Has been took %1's %MONETARY_UNIT%%2.","bank-takemoney-no-money":"%1 doesn't have %MONETARY_UNIT%%2.","bank-givemoney-must-bigger-than-zero":"You can't give money smaller than %MONETARY_UNIT%0","bank-givemoney-done":"Gave %MONETARY_UNIT%%2 to %1"}{"language":"it","language-set":"Lingua settata a %1 by luca28pet","request-cancelled":"La tua richiesta e stata cancellata","player-not-connected":"IL player %1 non e online nel server","player-never-connected":"Il player %1 non esiste","bank-credit-increase":"Il tuo credito bancario e aumentato","debt-increase":"Il tuo debito e stato incrementato. Hai un debito di : %MONETARY_UNIT%%1","topmoney-format":"[%1] %2: %3","takemoney-must-be-number":"Devi specificare una cifra valida","takemoney-invalid-number":"Numero non valido","takemoney-player-lack-of-money":"%1 non ha %MONETARY_UNIT%%2. Soldi di %1 : %MONETARY_UNIT%%3","takemoney-money-taken":"I tuoi %MONETARY_UNIT%%1 sono stati prelevati","takemoney-took-money":"Sono stai presi a %1 %MONETARY_UNIT%%2","takemoney-failed":"Hai fallito a prendere il denaro","givemoney-must-be-number":"Devi specificare una cifra valida","givemoney-invalid-number":"Numero non valido","givemoney-money-given":"%MONETARY_UNIT%%1 sono stati aggiunti ai tuoi soldi","givemoney-gave-money":"Sono stati dati %MONETARY_UNIT%%1 a %2","seemoney-seemoney":"Soldi di %1 : %2","setmoney-setmoney":"I soldi di %1 sono stati settati a %MONETARY_UNIT%%2","setmoney-failed":"Hai fallito a settare i soldi a causa di un errore sconosciuto.","setmoney-invalid-number":"%MONETARY_UNIT%%1 non e un ammontare valido","mymoney-mymoney":"I tuoi soldi : %MONETARY_UNIT%%1","mydebt-mydebt":"I tuoi debiti : %MONETARY_UNIT%%1","mystatus-show":"Lo stato dei miei soldi : %1% | Lo stato dei miei debiti : %2%","takedebt-must-bigger-than-zero":"Non puoi riscuotere debiti minori di %MONETARY_UNIT%0","takedebt-over-range-once":"Non puoi prestare %MONETARY_UNIT%%1 in una volta . Limit di debito : %MONETARY_UNIT%%2","takedebt-over-range":"Non puoi prestare %MONETARY_UNIT%%1. Limite di debito : %MONETARY_UNIT%%2","takedebt-takedebt":"Hai riscosso il debito di %MONETARY_UNIT%%1","takedebt-failed":"La riscossione del debito e fallita a causa di un errore sconosciuto","returndebt-must-bigger-than-zero":"Non puoi pagare meno %MONETARY_UNIT%0","returndebt-dont-have-debt":"Non hai %MONETARY_UNIT%%1 di debito. Il tuo debito e di : %MONETARY_UNIT%%2","returndebt-dont-have-money":"Non hai %MONETARY_UNIT%%1 . I tuoi soldi : %MONETARY_UNIT%%2","returndebt-returndebt":"Hai pagato %MONETARY_UNIT%%1 di debito . Il tuo debito : %MONETARY_UNIT%%2","returndebt-failed":"Pagamento del debito fallito a causa di un errore sconosciuto","bank-deposit-must-bigger-than-zero":"Il deposito deve essere maggiori di %MONETARY_UNIT%0","bank-deposit-dont-have-money":"Non hai %MONETARY_UNIT%%1 da depositare","bank-deposit-success":"Hai depositato %MONETARY_UNIT%%1","bank-deposit-failed":"Deposito fallito a causa di un errore sconosciuto","bank-withdraw-must-bigger-than-zero":"I soldi devono essere piu di %MONETARY_UNIT%0","bank-withdraw-lack-of-credit":"Non hai %MONETARY_UNIT%%1 nel tuo conto bancario","bank-withdraw-success":"Hai prelevato %MONETARY_UNIT%%1","bank-withdraw-failed":"Prelievo fallito a causa di un errore sconosciuto","bank-mymoney":"Hai %MONETARY_UNIT%%1 nel tuo conto bancario","bank-hismoney":"%1 ha %MONETARY_UNIT%%2 nel suo conto bancario","bank-takemoney-must-bigger-than-zero":"Non puoi sottrarre una quantita minore di %MONETARY_UNIT%0","bank-takemoney-done":"Sono stati presi dal conto di %1  %MONETARY_UNIT%%2.","bank-takemoney-no-money":"%1 non ha %MONETARY_UNIT%%2.","bank-givemoney-must-bigger-than-zero":"Non puoi dare denaro in quantita minore di %MONETARY_UNIT%0","bank-givemoney-done":"Sono stati dati %MONETARY_UNIT%%2 a %1"}{"language":"ko","language-set":"\uc5b8\uc5b4\uac00 %1 (onebone)\uc73c\ub85c \uc124\uc815\ub418\uc5c8\uc2b5\ub2c8\ub2e4","request-cancelled":"\ub2f9\uc2e0\uc758 \uc694\uccad\uc774 \uac70\ubd80\ub418\uc5c8\uc2b5\ub2c8\ub2e4","player-not-connected":"%1\ub2d8\uc740 \uc11c\ubc84\uc5d0 \uc811\uc18d\ub418\uc9c0 \uc54a\uc558\uc2b5\ub2c8\ub2e4.","player-never-connected":"%1\ub2d8\uc740 \uc11c\ubc84\uc5d0 \uc811\uc18d\ud55c \uc801\uc774 \uc5c6\uc2b5\ub2c8\ub2e4.","bank-credit-increase":"\uc740\ud589 \uc774\uc790\uac00 \ubd99\uc73c\uc168\uc2b5\ub2c8\ub2e4.","debt-increase":"\uc0ac\uccb4\uc5c5\uc790\uc5d0\uac8c\uc11c \uc774\uc790\uac00 \ubd99\uc5c8\uc2b5\ub2c8\ub2e4. \ud604\uc7ac \ube5a : %MONETARY_UNIT%%1","topmoney-format":"[%1] %2: %3","takemoney-must-be-number":"\uc218\ub7c9\uc740 \uc22b\uc790\uc5ec\uc57c\ud569\ub2c8\ub2e4.","takemoney-invalid-number":"\ubb34\ud6a8\ud55c \uc22b\uc790\uc785\ub2c8\ub2e4.","takemoney-player-lack-of-money":"%1\ub2d8\uc740 %MONETARY_UNIT%%2\ub9cc\ud07c\uc758 \ub3c8\uc744 \uac00\uc9c0\uace0 \uc788\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4. %1\ub2d8\uc758 \ub3c8 : %MONETARY_UNIT%%3","takemoney-money-taken":"%MONETARY_UNIT%%1\uc744(\ub97c) \ube8f\uae30\uc168\uc2b5\ub2c8\ub2e4.","takemoney-took-money":"%1\ub2d8\uc758 %MONETARY_UNIT%%2\uc744(\ub97c) \ube7c\uc557\uc73c\uc168\uc2b5\ub2c8\ub2e4.","takemoney-failed":"\ub3c8 \ube8f\uae30\ub97c \uc2e4\ud328\ud558\uc600\uc2b5\ub2c8\ub2e4.","givemoney-must-be-number":"\uc218\ub7c9\uc740 \uc22b\uc790\uc5ec\uc57c\ud569\ub2c8\ub2e4.","givemoney-invalid-number":"\ubb34\ud6a8\ud55c \uc22b\uc790\uc785\ub2c8\ub2e4.","givemoney-money-given":"%MONETARY_UNIT%%1\ub97c \uc5bb\uc73c\uc168\uc2b5\ub2c8\ub2e4.","givemoney-gave-money":"%2\ub2d8\uc5d0\uac8c %MONETARY_UNIT%%1\ub97c \uc8fc\uc168\uc2b5\ub2c8\ub2e4.","seemoney-seemoney":"%1\ub2d8\uc758 \ub3c8 : %MONETARY_UNIT%%2","setmoney-setmoney":"%1\ub2d8\uc758 \ub3c8\uc774 %MONETARY_UNIT%%2\uc73c\ub85c \uc124\uc815\ub418\uc5c8\uc2b5\ub2c8\ub2e4.","setmoney-failed":"\uc54c\uc218 \uc5c6\ub294 \uc774\uc720\ub85c \ub3c8\uc744 \uc124\uc815\ud558\ub294\ub370 \uc2e4\ud328\ud558\uc600\uc2b5\ub2c8\ub2e4.","setmoney-invalid-number":"%1\ub294 \ubb34\ud6a8\ud55c \uc22b\uc790\uc785\ub2c8\ub2e4.","mymoney-mymoney":"\ub0b4 \ub3c8 : %MONETARY_UNIT%%1","mydebt-mydebt":"\ub0b4 \ube5a : %MONETARY_UNIT%%1","mystatus-show":"\ub0b4 \ub3c8 \uc0c1\ud669 : %1% | \ub0b4 \ube5a \uc0c1\ud669 : %2%","takedebt-must-bigger-than-zero":"%MONETARY_UNIT%0 \uc774\ud558\uc758 \ub3c8\uc744 \ube4c\ub9b4 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4.","takedebt-over-range-once":"%MONETARY_UNIT%%1\uc744(\ub97c) \ud55c\ubc88\uc5d0 \ube4c\ub9b4 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4. \ud55c\ubc88\uc5d0 \ube4c\ub9b4 \uc218 \uc788\ub294 \ub3c8 : %MONETARY_UNIT%%2","takedebt-over-range":"%MONETARY_UNIT%%1\uc744(\ub97c) \ube4c\ub9b4 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4. \ube5a \uc81c\ud55c : %MONETARY_UNIT%%2","takedebt-takedebt":"%MONETARY_UNIT%%1\ub9cc\ud07c\uc758 \ube5a\uc744 \uc9c0\uc168\uc2b5\ub2c8\ub2e4.","takedebt-failed":"\uc54c\uc218 \uc5c6\ub294 \uc774\uc720\ub85c \ube5a\uc744 \uc9c0\ub294\ub370 \uc2e4\ud328\ud558\uc600\uc2b5\ub2c8\ub2e4.","returndebt-must-bigger-than-zero":"%MONETARY_UNIT%0\ubcf4\ub2e4 \uc791\uc740 \ube5a\uc744 \ub3cc\ub824\uc904\uc218 \uc5c6\uc2b5\ub2c8\ub2e4","returndebt-dont-have-debt":"%MONETARY_UNIT%%1\ub9cc\ud07c\uc758 \ube5a\uc744 \uac00\uc9c0\uace0 \uc788\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4. \ub0b4 \ube5a : %MONETARY_UNIT%%2","returndebt-dont-have-money":"%MONETARY_UNIT%%1\ub9cc\ud07c\uc758 \ub3c8\uc744 \uac00\uc9c0\uace0 \uc788\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4. \ub0b4 \ub3c8 : %MONETARY_UNIT%%2","returndebt-returndebt":"%MONETARY_UNIT%%1\uc758 \ube5a\uc744 \uac1a\uc558\uc2b5\ub2c8\ub2e4. \ub0b4 \ube5a : %MONETARY_UNIT%%2","returndebt-failed":"\uc54c \uc218 \uc5c6\ub294 \uc624\ub958\ub85c \uc778\ud558\uc5ec \ube5a\uc744 \uac1a\uae30\uc5d0 \uc2e4\ud328\ud558\uc600\uc2b5\ub2c8\ub2e4.","bank-deposit-must-bigger-than-zero":"\ub3c8\uc740 %MONETARY_UNIT%0\ubcf4\ub2e4 \ucee4\uc57c\ud569\ub2c8\ub2e4.","bank-deposit-dont-have-money":"%MONETARY_UNIT%%1\ub97c \uc800\uae08\ud560 \ub3c8\uc774 \uc5c6\uc2b5\ub2c8\ub2e4.","bank-deposit-success":"%MONETARY_UNIT%%1\ub97c \uc800\uae08\ud558\uc600\uc2b5\ub2c8\ub2e4.","bank-deposit-failed":"\uc54c \uc218 \uc5c6\ub294 \uc624\ub958\ub85c \uc800\uae08\uc744 \uc2e4\ud328\ud558\uc600\uc2b5\ub2c8\ub2e4.","bank-withdraw-must-bigger-than-zero":"\ub3c8\uc740 %MONETARY_UNIT%0\ubcf4\ub2e4 \ub9ce\uc544\uc57c\ud569\ub2c8\ub2e4.","bank-withdraw-lack-of-credit":"%MONETARY_UNIT%%1\ub9cc\ud07c\uc758 \ub3c8\uc774 \ub2f9\uc2e0\uc758 \uc740\ud589 \uacc4\uc88c\uc5d0 \uc5c6\uc2b5\ub2c8\ub2e4.","bank-withdraw-success":"%MONETARY_UNIT%%1\uc758 \ub3c8\uc744 \uc740\ud589\uc73c\ub85c\ubd80\ud130 \ucd9c\uae08\ud558\uc600\uc2b5\ub2c8\ub2e4.","bank-withdraw-failed":"F\uc54c \uc218 \uc5c6\ub294 \uc624\ub958\ub85c \ucd9c\uae08\uc5d0 \uc2e4\ud328\ud558\uc600\uc2b5\ub2c8\ub2e4.","bank-mymoney":"%MONETARY_UNIT%%1\uac00 \ub2f9\uc2e0\uc758 \uc740\ud589 \uacc4\uc88c\uc5d0 \uc788\uc2b5\ub2c8\ub2e4.","bank-hismoney":"%1\ub294 %MONETARY_UNIT%%2\ub97c \uadf8\uc758 \uacc4\uc88c\uc5d0 \uac00\uc9c0\uace0 \uc788\uc2b5\ub2c8\ub2e4.","bank-takemoney-must-bigger-than-zero":"%MONETARY_UNIT%0\ubcf4\ub2e4 \uc801\uc740 \ub3c8\uc744 \uac00\uc838\uac08\uc218 \uc5c6\uc2b5\ub2c8\ub2e4.","bank-takemoney-done":"%1\uc73c\ub85c \ubd80\ud130 %MONETARY_UNIT%%2\ub9cc\ud07c\uc758 \ub3c8\uc744 \uac00\uc838\uc62c\uc218 \uc5c6\uc2b5\ub2c8\ub2e4.","bank-takemoney-no-money":"%1\ub2d8\uc740 %MONETARY_UNIT%%2\ub97c \uac00\uc9c0\uace0 \uc788\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.","bank-givemoney-must-bigger-than-zero":"%MONETARY_UNIT%0\ubcf4\ub2e4 \uc801\uc740 \ub3c8\uc744 \uc904\uc218 \uc5c6\uc2b5\ub2c8\ub2e4.","bank-givemoney-done":"%1\uc5d0\uac8c %MONETARY_UNIT%%2\uc744(\ub97c) \uc8fc\uc5c8\uc2b5\ub2c8\ub2e4."}<?php
+
+namespace onebone\economyapi\commands;
+
+use pocketmine\command\CommandSender;
+use pocketmine\Server;
+
+use onebone\economyapi\EconomyAPI;
+
+class SetMoneyCommand extends EconomyAPICommand{
+	private $plugin, $cmd;
+	
+	public function __construct(EconomyAPI $api, $cmd = "setmoney"){
+		parent::__construct($cmd, $api);
+		$this->cmd = $cmd;
+		$this->setUsage("/$cmd <player> <money>");
+		$this->setDescription("Sets player's money");
+		$this->setPermission("economyapi.command.setmoney");
+	}
+	
+	public function execute(CommandSender $sender, $label, array $args){
+		if(!$this->getPlugin()->isEnabled()){
+			return false;
+		}
+		if(!$this->testPermission($sender)){
+			return false;
+		}
+		
+		$player = array_shift($args);
+		$money = array_shift($args);
+		
+		if(trim($player) === "" or trim($money) === ""){
+			$sender->sendMessage("Usage: /".$this->cmd." <player> <money>");
+			return true;
+		}
+		
+		//  Player finder  //
+		$server = Server::getInstance();
+		$p = $server->getPlayer($player);
+		if($p instanceof Player){
+			$player = $p->getName();
+		}
+		// END //
+		
+		$result = $this->getPlugin()->setMoney($player, $money, "SetMoneyCommand");
+		$output = "";
+		switch($result){
+			case -2:
+			$output .= $this->getPlugin()->getMessage("setmoney-failed", $sender->getName());
+			break;
+			case -1:
+			$output .= $this->getPlugin()->getMessage("player-never-connected", $sender->getName(), array($player, "%2", "%3", "%4"));
+			break;
+			case 0:
+			$output .= $this->getPlugin()->getMessage("setmoney-invalid-number", $sender->getName(), array($money, "%2", "%3", "%4"));
+			break;
+			case 1:
+			$output .= $this->getPlugin()->getMessage("setmoney-setmoney", $sender->getName(), array($player, $money, "%3", "%4"));
+			break;
+		}
+		$sender->sendMessage($output);
+		return true;
+	}
+}<?php
+
+namespace onebone\economyapi\commands;
+
+use pocketmine\command\Command;
+use pocketmine\command\PluginIdentifiableCommand;
+
+use onebone\economyapi\EconomyAPI;
+
+abstract class EconomyAPICommand extends Command implements PluginIdentifiableCommand{
+	private $owingPlugin;
+	
+	public function __construct($name, EconomyAPI $plugin){
+		parent::__construct($name);
+		$this->owningPlugin = $plugin;
+		$this->usageMessage = "";
+	}
+
+	public function getPlugin(){
+		return $this->owningPlugin;
+	}
+}<?php
+
+namespace onebone\economyapi\commands;
+
+use pocketmine\command\CommandSender;
+use pocketmine\Server;
+use pocketmine\Player;
+
+use onebone\economyapi\EconomyAPI;
+
+class SeeMoneyCommand extends EconomyAPICommand{
+	private $plugin, $cmd;
+	
+	public function __construct(EconomyAPI $plugin, $cmd = "seemoney"){
+		parent::__construct($cmd, $plugin);
+		$this->cmd = $cmd;
+		$this->setUsage("/$cmd <player>");
+		$this->setDescription("See player's money");
+		$this->setPermission("economyapi.command.seemoney");
+	}
+	
+	public function execute(CommandSender $sender, $label, array $args){
+		if(!$this->getPlugin()->isEnabled()){
+			return false;
+		}
+		if(!$this->testPermission($sender)){
+			return false;
+		}
+		
+		$player = array_shift($args);
+		if(trim($player) === ""){
+			$sender->sendMessage("Usage: /".$this->cmd." <player>");
+			return true;
+		}
+		
+		//  Player finder  //
+		$server = Server::getInstance();
+		$p = $server->getPlayer($player);
+		if($p instanceof Player){
+			$player = $p->getName();
+		}
+		// END //
+		$result = $this->getPlugin()->myMoney($player);
+		if($result === false){
+			$sender->sendMessage($this->getPlugin()->getMessage("player-never-connected", $sender->getName(), array($player, "%2", "%3", "%4")));
+			return true;
+		}else{
+			$sender->sendMessage($this->getPlugin()->getMessage("seemoney-seemoney", $sender->getName(), array($player, $result, "%3", "%4")));
+			return true;
+		}
+	}
+}<?php
+
+namespace onebone\economyapi\commands;
+
+use pocketmine\command\CommandSender;
+use pocketmine\Player;
+
+use onebone\economyapi\EconomyAPI;
+
+class MyMoneyCommand extends EconomyAPICommand{
+	private $plugin;
+	
+	public function __construct(EconomyAPI $api, $cmd = "mymoney"){
+		parent::__construct($cmd, $api);
+		$this->setUsage("/$cmd");
+		$this->setDescription("Shows your money");
+		$this->setPermission("economyapi.command.mymoney");
+	}
+	
+	public function execute(CommandSender $sender, $label, array $args){
+		if(!$this->getPlugin()->isEnabled()){
+			return false;
+		}
+		if(!$this->testPermission($sender)){
+			return false;
+		}
+		
+		if(!$sender instanceof Player){
+			$sender->sendMessage("Please run this command in-game");
+			return true;
+		}
+		$username = $sender->getName();
+		$result = $this->getPlugin()->myMoney($username);
+		$sender->sendMessage($this->getPlugin()->getMessage("mymoney-mymoney", $sender->getName(), array($result, "%2", "%3", "%4")));
+	}
+}<?php
+
+namespace onebone\economyapi\commands;
+
+use pocketmine\Server;
+use pocketmine\command\CommandSender;
+use pocketmine\Player;
+
+use onebone\economyapi\EconomyAPI;
+
+class PayCommand extends EconomyAPICommand{
+	private $plugin;
+	
+	public function __construct(EconomyAPI $plugin, $cmd = "pay"){
+		parent::__construct($cmd, $plugin);
+		$this->setUsage("/$cmd <player> <amount>");
+		$this->setPermission("economyapi.command.pay");
+		$this->setDescription("Pay or give the money to the others");
+	}
+	
+	public function execute(CommandSender $sender, $label, array $params){
+		$plugin = $this->getPlugin();
+		if(!$plugin->isEnabled()){
+			return false;
+		}
+		if(!$this->testPermission($sender)){
+			return false;
+		}
+		if(!$sender instanceof Player){
+			$sender->sendMessage("Please run this command in-game");
+			return true;
+		}
+		
+		$player = array_shift($params);
+		$amount = array_shift($params);
+		
+		if(trim($player) === "" or trim($amount) === "" or !is_numeric($amount)){
+			$sender->sendMessage("Usage: ".$this->getUsage());
+			return true;
+		}
+		
+		$server = Server::getInstance();
+		//  Player finder  //
+		$p = $server->getPlayer($player);
+		if($p instanceof Player){
+			$player = $p->getName();
+		}
+		// END //
+		
+		$result = $plugin->reduceMoney($sender, $amount);
+		if($result !== EconomyAPI::RET_SUCCESS){
+			$sender->sendMessage("Your request have been denied");
+			return true;
+		}
+		$result = $plugin->addMoney($player, $amount);
+		if($result !== EconomyAPI::RET_SUCCESS){
+			$sender->sendMessage("Your request have been denied");
+			$plugin->addMoney($sender, $amount, true);
+			return true;
+		}
+		$sender->sendMessage("Paid \$$amount to $player");
+	}
+}<?php
+
+namespace onebone\economyapi\commands;
+
+use pocketmine\Player;
+use pocketmine\command\CommandSender;
+use pocketmine\Server;
+
+use onebone\economyapi\EconomyAPI;
+
+class GiveMoneyCommand extends EconomyAPICommand{
+	private $plugin, $cmd;
+	
+	public function __construct(EconomyAPI $api, $cmd = "givemoney"){
+		parent::__construct($cmd, $api);
+		$this->cmd = $cmd;
+		$this->setUsage("/$cmd <player> <amount>");
+		$this->setDescription("Gives money to player");
+		$this->setPermission("economyapi.command.givemoney");
+	}
+	
+	public function execute(CommandSender $sender, $label, array $args){
+		$plugin = $this->getPlugin();
+		if(!$plugin->isEnabled()){
+			return false;
+		}
+		if(!$this->testPermission($sender)){
+			return false;
+		}
+		
+		$player = array_shift($args);
+		$amount = array_shift($args);
+		
+		if(trim($player) === "" or trim($amount) === "" or !is_numeric($amount)){
+			$sender->sendMessage("Usage: /".$this->cmd." <player> <amount>");
+			return true;
+		}
+		
+		if($amount <= 0){
+			$sender->sendMessage($plugin->getMessage("givemoney-invalid-number", $sender->getName()));
+			return true;
+		}
+		
+		//  Player finder  //
+		$server = Server::getInstance();
+		$p = $server->getPlayer($player);
+		if($p instanceof Player){
+			$player = $p->getName();
+		}
+		// END //
+		
+		$result = $plugin->addMoney($player, $amount);
+		$output = "";
+		switch($result){
+			case -2: // CANCELLED
+			$output .= "Your request have been cancelled";
+			break;
+			case -1: // NOT_FOUND
+			$output .= $plugin->getMessage("player-never-connected", $sender->getName(), array($player, "%2", "%3", "%4"));
+			break;
+			// INVALID is already checked
+			case 1: // SUCCESS
+			$output .= $plugin->getMessage("givemoney-gave-money", $sender->getName(), array($amount, $player, "%3", "%4"));
+			if($p instanceof Player){
+				$p->sendMessage($plugin->getMessage("givemoney-money-given", $sender->getName(), array($amount, "%2", "%3", "%4")));
+			}
+			break;
+		}
+		$sender->sendMessage($output);
+		return true;
+	}
+}<?php
+
+namespace onebone\economyapi\commands;
+
+use pocketmine\Player;
+use pocketmine\command\CommandSender;
+
+use onebone\economyapi\EconomyAPI;
+
+class TakeDebtCommand extends EconomyAPICommand{
+	private $plugin, $cmd;
+	
+	public function __construct(EconomyAPI $plugin, $cmd = "takedebt"){
+		parent::__construct($cmd, $plugin);
+		$this->cmd = $cmd;
+		$this->setUsage("/$cmd <amount>");
+		$this->setPermission("economyapi.command.takedebt");
+		$this->setDescription("Takes debt from plugin");
+	}
+	
+	public function execute(CommandSender $sender, $label, array $params){
+		if(!$this->getPlugin()->isEnabled()){
+			return false;
+		}
+		if(!$this->testPermission($sender)){
+			return false;
+		}
+		
+		if(!$sender instanceof Player){
+			$sender->sendMessage("Please run this command in-game.");
+			return true;
+		}
+		
+		$amount = array_shift($params);
+		
+		if(trim($amount) === "" or !is_numeric($amount)){
+			$sender->sendMessage("Usage: /$cmd <amount>");
+			return true;
+		}
+		$result = $this->getPlugin()->addDebt($sender, $amount, false, "TakeDebtCommand");
+		$output = "";
+		switch($result){
+			case -4: // RET_ERROR_1
+			$output .= $this->getPlugin()->getMessage("takedebt-over-range", $sender->getName(), array($amount, $this->getPlugin()->getConfigurationValue("debt-limit"), "%3", "%4"));
+			break;
+			case -3: // RET_ERROR2
+			$output .= $this->getPlugin()->getMessage("takedebt-over-range-once", $sender->getName(), array($amount, $this->getPlugin()->getConfigurationValue("once-debt-limit"), "%3", "%4"));
+			break;	
+			case -2: // RET_CANCELLED
+			$output .= $this->getPlugin()->getMessage("request-cancelled", $sender->getName());
+			break;
+			case 0: // RET_INVALID
+			$output .= $this->getPlugin()->getMessage("takedebt-must-bigger-than-zero", $sender->getName());
+			break;
+			case 1: // RET_SUCCESS
+			$output .= $this->getPlugin()->getMessage("takedebt-takedebt", $sender->getName(), array($amount, "%2", "%3", "%4"));
+			break;
+		}
+		$sender->sendMessage($output);
+		return true;
+	}
+}<?php
+
+namespace onebone\economyapi\commands;
+
+use pocketmine\command\CommandSender;
+use pocketmine\Player;
+
+use onebone\economyapi\EconomyAPI;
+
+class EconomySCommand extends EconomyAPICommand{
+	private $plugin;
+	
+	public function __construct(EconomyAPI $plugin, $cmd = "economys"){
+		parent::__construct($cmd, $plugin);
+		$this->plugin = $plugin;
+		$this->setPermission("economyapi.command.economys");
+		$this->setDescription("Shows plugin list compatible with EconomyAPI");
+		$this->setUsage("/$cmd");
+	}
+	
+	public function execute(CommandSender $sender, $label, array $params){
+		if(!$this->getPlugin()->isEnabled()){
+			return false;
+		}
+		if(!$this->testPermission($sender)){
+			return false;
+		}
+		$output = "Showing list :\n";
+		foreach($this->getPlugin()->getList() as $plugin){
+			$output .= $plugin.", ";
+		}
+		$output = substr($output, 0, -2);
+		$sender->sendMessage($output);
+		return true;
+	}
+}<?php
+
+namespace onebone\economyapi\commands;
+
+use pocketmine\command\CommandSender;
+use pocketmine\Server;
+
+use onebone\economyapi\EconomyAPI;
+
+class TopMoneyCommand extends EconomyAPICommand{
+	private $plugin, $cmd;
+	
+	public function __construct(EconomyAPI $plugin, $cmd = "topmoney"){
+		parent::__construct($cmd, $plugin);
+		$this->plugin = $plugin;
+		$this->setUsage("/$cmd <page>");
+		$this->setDescription("Shows top money list");
+		$this->setPermission("economyapi.command.topmoney");
+	}
+	
+	public function execute(CommandSender $sender, $label, array $params){
+		if(!$this->getPlugin()->isEnabled() or !$this->testPermission($sender)){
+			return false;
+		}
+		
+		$page = array_shift($params);
+		
+		$moneyData = $this->getPlugin()->getAllMoney();
+		
+		$server = Server::getInstance();
+		$banList = $server->getNameBans(); // TODO TopMoney Command
+		arsort($moneyData["money"]);
+		$n = 1;
+		$max = ceil((count($moneyData["money"]) - count($banList->getEntries()) - ($this->getPlugin()->getConfigurationValue("add-op-at-rank") ? 0 : count($server->getOPs()->getAll()))) / 5);
+		$page = max(1, $page);
+		$page = min($max, $page);
+		$page = (int)$page;
+		
+		$output = "- Showing top money list ($page of $max) -\n";
+		$message = ($this->getPlugin()->getMessage("topmoney-format", $sender->getName(), array("%1", "%2", "%3", "%4"))."\n");
+		
+		foreach($moneyData["money"] as $player => $money){
+			if($banList->isBanned($player)) continue;
+			if($server->isOp(strtolower($player)) and ($this->getPlugin()->getConfigurationValue("add-op-at-rank") === false)) continue;
+			$current = (int)ceil($n / 5);
+			if($current === $page){
+				$output .= str_replace(array("%1", "%2", "%3"), array($n, $player, $money), $message);
+			}elseif($current > $page){
+				break;
+			}
+			++$n;
+		}
+		$sender->sendMessage($output);
+		return true;
+	}
+}<?php
+
+namespace onebone\economyapi\commands;
+
+use pocketmine\command\CommandSender;
+
+use onebone\economyapi\EconomyAPI;
+
+class SetLangCommand extends EconomyAPICommand{
+	private $plugin, $cmd;
+	
+	public function __construct(EconomyAPI $plugin, $cmd = "setlang"){
+		parent::__construct($cmd, $plugin);
+		$this->cmd = $cmd;
+		$this->setUsage("/$cmd <lang>");
+		$this->setPermission("economyapi.command.setlang");
+		$this->setDescription("Sets language resource");
+	}
+	
+	public function execute(CommandSender $sender, $label, array $params){
+		if(!$this->getPlugin()->isEnabled() or !$this->testPermission($sender)){
+			return false;
+		}
+		
+		$lang = implode(" ", $params);
+		
+		if(trim($lang) === ""){
+			$sender->sendMessage("Usage : /".$this->cmd." <lang>");
+			return true;
+		}
+		
+		$result = $this->getPlugin()->setLang($lang, $sender->getName());
+		if($result === false){
+			$sender->sendMessage("Requested language does not exist");
+		}else{
+			$sender->sendMessage("Your language have been set to ".$result);
+		}
+		return true;
+	}
+}<?php
+
+namespace onebone\economyapi\commands;
+
+use pocketmine\command\CommandSender;
+use pocketmine\Player;
+use pocketmine\Server;
+
+use onebone\economyapi\EconomyAPI;
+
+class TakeMoneyCommand extends EconomyAPICommand{
+	private $plugin, $cmd;
+	
+	public function __construct(EconomyAPI $plugin, $cmd = "takemoney"){
+		parent::__construct($cmd, $plugin);
+		$this->cmd = $cmd;
+		$this->setUsage("/$cmd <player> <amount>");
+		$this->setPermission("economyapi.command.takemoney");
+		$this->setDescription("Take others' money");
+	}
+	
+	public function execute(CommandSender $sender, $label, array $params){
+		if(!$this->getPlugin()->isEnabled() or !$this->testPermission($sender)){
+			return false;
+		}
+		
+		$player = array_shift($params);
+		$amount = array_shift($params);
+		
+		if(trim($player) === "" or trim($amount) === "" or !is_numeric($amount)){
+			$sender->sendMessage("Usage: /".$this->cmd." <player> <amount>");
+			return true;
+		}
+		
+		if($amount <= 0){
+			$sender->sendMessage($this->getPlugin()->getMessage("takemoney-invalid-number", $sender->getName()));
+			return true;
+		}
+		
+		/*$p = $this->getPlugin()->getServer()->getPlayer($player);
+		if($p instanceof Player){
+			$player = $p->getName();
+		}else{
+			$result = $this->getPlugin()->accountExists($player);
+			if($result === false){
+				$sender->sendMessage($this->getPlugin()->getMessage("player-never-connected", $sender->getName(), array($player, "%2", "%3", "%4")));
+				return true;
+			}
+		}*/
+		//  Player finder  //
+		$server = Server::getInstance();
+		$p = $server->getPlayer($player);
+		if($p instanceof Player){
+			$player = $p->getName();
+		}
+		// END //
+		
+		$result = $this->getPlugin()->reduceMoney($player, $amount, false, "TakeMoneyCommand");
+		$output = "";
+		switch($result){
+			case EconomyAPI::RET_SUCCESS:
+			$output .= $this->getPlugin()->getMessage("takemoney-took-money", $sender->getName(), array($player, $amount, "%3", "%4"));
+			break;
+			case EconomyAPI::RET_INVALID:
+			$output .= $this->getPlugin()->getMessage("takemoney-player-lack-of-money", $sender->getName(), array($player, $amount, $this->getPlugin()->myMoney($player), "%4"));
+			break;
+			default:
+			$output .= $this->getPlugin()->getMessage("takemoney-failed", $sender->getName());
+		}
+		$sender->sendMessage($output);
+	}
+}<?php
+
+namespace onebone\economyapi\commands;
+
+use onebone\economyapi\EconomyAPI;
+
+use pocketmine\command\CommandSender;
+use pocketmine\Player;
+use pocketmine\Server;
+
+class BankCommand extends EconomyAPICommand{
+	private $plugin, $cmd;
+	
+	public function __construct(EconomyAPI $plugin, $cmd = "bank"){
+		parent::__construct($cmd, $plugin);
+		$this->cmd = $cmd;
+		$this->plugin = $plugin;
+		$this->setPermission("economyapi.command.bank");
+		$this->setDescription("Command for controlling bank account");
+		$this->setUsage("/$cmd <deposit|withdraw|seemoney|mymoney>");
+	}
+	
+	public function execute(CommandSender $sender, $label, array $params){
+		if(!$this->testPermission($sender) or !$this->plugin->isEnabled()){
+			return false;
+		}
+		
+		$sub = array_shift($params);
+		$amount = array_shift($params);
+		
+		switch($sub){
+			case "deposit":
+			if(trim($amount) === "" or !is_numeric($amount)){
+				$sender->sendMessage("Usage: /".$this->getName()." deposit <amount>");
+				return true;
+			}
+			if(!$sender instanceof Player){
+				$sender->sendMessage("Please run this command in-game");
+				return true;
+			}
+			
+			$money = $this->plugin->myMoney($sender->getName());
+			
+			if($money < $amount){
+				$sender->sendMessage($this->plugin->getMessage("bank-deposit-dont-have-money", $sender->getName(), array($amount, $money, "%3", "%4")));
+				return true;
+			}
+			
+			$this->plugin->reduceMoney($sender->getName(), $amount, true); // Reduce money in force
+			$result = $this->plugin->addBankMoney($sender->getName(), $amount, true);
+			if($result === EconomyAPI::RET_SUCCESS){
+				$sender->sendMessage($this->plugin->getMessage("bank-deposit-success", $sender->getName(), array($amount, "%2", "%3", "%4")));
+			}else{
+				$sender->sendMessage($this->plugin->getMessage("bank-deposit-failed", $sender->getName()));
+			}
+			break;
+			case "withdraw":
+			if(trim($amount) === "" or !is_numeric($amount)){
+				$sender->sendMessage("Usage: /".$this->getName()." withdraw <amount>");
+				return true;
+			}
+			if(!$sender instanceof Player){
+				$sender->sendMessage("Please run this command in-game");
+				return true;
+			}
+			
+			$money = $this->plugin->myBankMoney($sender->getName());
+			
+			if($money < $amount){
+				$sender->sendMessage($this->plugin->getMessage("bank-withdraw-lack-of-credit", $sender->getName(), array($amount, $money, "%3", "%4")));
+				return true;
+			}else{
+				$this->plugin->reduceBankMoney($sender->getName(), $amount, true);
+				$this->plugin->addMoney($sender->getName(), $amount, true);
+				$sender->sendMessage($this->plugin->getMessage("bank-withdraw-success", $sender->getName(), array($amount, "%2", "%3", "%4")));
+				return true;
+			}
+			break;
+			case "seemoney":
+			if(trim($amount) === ""){
+				$sender->sendMessage("Usage: /".$this->getName()." seemoney <player>");
+				return true;
+			}
+			
+			//  Player finder  //
+			$server = Server::getInstance();
+			$p = $server->getPlayer($amount);
+			if($p instanceof Player){
+				$player = $p->getName();
+			}
+			// END //
+			
+			$money = $this->plugin->myBankMoney($amount);
+			if($money === false){
+				$sender->sendMessage($this->plugin->getMessage("player-never-connected", $sender->getName(), array($amount, "%2", "%3", "%4")));
+			}else{
+				$sender->sendMessage($this->plugin->getMessage("bank-hismoney", $sender->getName(), array($amount, $money, "%3", "%4")));
+			}
+			return true;
+			case "mymoney":
+			$money = $this->plugin->myBankMoney($sender);
+			$sender->sendMessage($this->plugin->getMessage("bank-mymoney", $sender->getName(), array($money, "%2", "%3", "%4")));
+			break;
+			default:
+			$sender->sendMessage("Usage: /".$this->cmd." <deposit|withdraw|seemoney|mymoney>");
+		}
+	}
+}<?php
+
+namespace onebone\economyapi\commands;
+
+use onebone\economyapi\EconomyAPI;
+
+use pocketmine\command\CommandSender;
+use pocketmine\Player;
+
+class MyDebtCommand extends EconomyAPICommand{
+	private $plugin;
+	
+	public function __construct(EconomyAPI $plugin, $cmd = "mydebt"){
+		parent::__construct($cmd, $plugin);
+		$this->plugin = $plugin;
+		$this->setUsage("/$cmd");
+		$this->setPermission("economyapi.command.mydebt");
+		$this->setDescription("Shows my debt");
+	}
+	
+	public function execute(CommandSender $sender, $label, array $params){
+		if(!$this->plugin->isEnabled() or !$this->testPermission($sender)){
+			return false;
+		}
+		
+		if(!$sender instanceof Player){
+			$sender->sendMessage("Please run this command in-game,");
+			return true;
+		}
+		
+		$mine = $this->plugin->myDebt($sender);
+		
+		$sender->sendMessage($this->plugin->getMessage("mydebt-mydebt", $sender->getName(), array($mine, "%2", "%3", "%4")));
+		return true;
+	}
+}<?php
+
+namespace onebone\economyapi\commands;
+
+use pocketmine\command\CommandSender;
+use pocketmine\Player;
+
+use onebone\economyapi\EconomyAPI;
+
+class ReturnDebtCommand extends EconomyAPICommand{
+	private $plugin, $cmd;
+	
+	public function __construct(EconomyAPI $plugin, $cmd = "returndebt"){
+		parent::__construct($cmd, $plugin);
+		$this->plugin = $plugin;
+		$this->cmd = $cmd;
+		$this->setUsage("/$cmd <amount>");
+		$this->setDescription("Returns debt from your account");
+		$this->setPermission("economyapi.command.returndebt");
+	}
+	
+	public function execute(CommandSender $sender, $label, array $params){
+		if(!$this->plugin->isEnabled() or !$this->testPermission($sender)){
+			return false;
+		}
+		
+		if(!$sender instanceof Player){
+			$sender->sendMessage("Please run this command in-game.");
+			return true;
+		}
+		
+		$amount = array_shift($params);
+		
+		if(trim($amount) === "" or (!is_numeric($amount) and $amount !== "all")){
+			$sender->sendMessage("Usage: /".$this->cmd." <amount>");
+			return true;
+		}
+		
+		if($amount === "all"){
+			$amount = $this->plugin->myDebt($sender);
+		}
+		if($amount <= 0){
+			$sender->sendMessage($this->plugin->getMessage("returndebt-must-bigger-than-zero", $sender->getName()));
+			return true;
+		}
+		
+		if($this->plugin->myMoney($sender) < $amount){
+			$sender->sendMessage($this->plugin->getMessage("returndebt-dont-have-money", $sender->getName(), array($amount, $this->plugin->myMoney($sender), "%3", "%4")));
+			return true;
+		}
+		
+		$result = $this->plugin->reduceDebt($sender, $amount, false, "ReturnDebtCommand");
+		switch($result){
+			case EconomyAPI::RET_INVALID:
+			$sender->sendMessage($this->plugin->getMessage("returndebt-dont-have-debt", $sender->getName(), array($amount, $this->plugin->myDebt($sender), "%3", "%4")));
+			break;
+			case EconomyAPI::RET_CANCELLED:
+			$sender->sendMessage($this->plugin->getMessage("returndebt-failed", $sender->getName()));
+			break;
+			case EconomyAPI::RET_SUCCESS:
+			$sender->sendMessage($this->plugin->getMessage("returndebt-returndebt", $sender->getName(), array($amount, $this->plugin->myDebt($sender), "%3", "%4")));
+			break;
+		}
+		return true;
+	}
+}<?php
+
+namespace onebone\economyapi\commands;
+
+use pocketmine\command\CommandSender;
+use pocketmine\Server;
+
+use onebone\economyapi\EconomyAPI;
+
+class BankAdminCommand extends EconomyAPICommand{
+	private $plugin;
+	
+	public function __construct(EconomyAPI $plugin, $cmd = "bankadmin"){
+		parent::__construct($cmd, $plugin);
+		$this->setUsage("/$cmd <takemoney|givemoney> <player> <amount>");
+		$this->setDescription("Manages players' bank account");
+		$this->setPermission("economyapi.command.bankadmin");
+	}
+	
+	public function execute(CommandSender $sender, $label, array $params){
+		$plugin = $this->getPlugin();
+		if(!$plugin->isEnabled() or !$this->testPermission($sender)){
+			return false;
+		}
+		
+		$sub = array_shift($params);
+		$player = array_shift($params);
+		$amount = array_shift($params);
+		
+		if(trim($sub) === "" or trim($player) === "" or trim($amount) === "" or !is_numeric($amount)){
+			$sender->sendMessage("Usage: ".$this->usageMessage);
+			return true;
+		}
+		
+		if($amount <= 0){
+			$sender->sendMessage($plugin->getMessage("bank-takemoney-must-bigger-than-zero", $sender->getName()));
+			return true;
+		}
+		
+		//  Player finder  //
+		$server = Server::getInstance();
+		$p = $server->getPlayer($player);
+		if($p instanceof Player){
+			$player = $p->getName();
+		}
+		// END //
+		
+		switch($sub){
+			case "takemoney":
+			$result = $plugin->reduceBankMoney($player, $amount, true, "BankAdminCommand");
+			$output = "";
+			switch($result){
+				case EconomyAPI::RET_INVALID:
+				$output .= $plugin->getMessage("bank-takemoney-no-money", $sender->getName(), array($player, $amount, $plugin->myBankMoney($player), "%4"));
+				break;
+				case EconomyAPI::RET_SUCCESS:
+				$output .= $plugin->getMessage("bank-takemoney-done", $sender->getName(), array($player, $amount, $plugin->myBankMoney($player), "%4"));
+				break;
+				case EconomyAPI::RET_NOT_FOUND:
+				$output .= $plugin->getMessage("player-never-connected", $sender->getName(), array($player, "%2", "%3", "%4"));
+				break;
+			}
+			$sender->sendMessage($output);
+			break;
+			case "givemoney":
+			$result = $plugin->addBankMoney($player, $amount, true, "BankAdminCommand");
+			$output = "";
+			switch($result){
+				case EconomyAPI::RET_INVALID:
+				$output .= $plugin->getMessage("bank-givemoney-must-bigger-than-zero", $sender->getName());
+				break;
+				case EconomyAPI::RET_SUCCESS:
+				$output .= $plugin->getMessage("bank-givemoney-done", $sender->getName(), array($player, $amount, $plugin->myBankMoney($player), "%4"));
+				break;
+				case EconomyAPI::RET_NOT_FOUND:
+				$output .= $plugin->getMessage("player-never-connected", $sender->getName(), array($player, "%2", "%3", "%4"));
+				break;
+			}
+			$sender->sendMessage($output);
+			break;
+			default:
+			$sender->sendMessage("Usage: ".$this->usageMessage);
+		}
+		return true;
+	}
+}<?php
+
+namespace onebone\economyapi\commands;
+
+use pocketmine\command\CommandSender;
+use pocketmine\Player;
+
+use onebone\economyapi\EconomyAPI;
+
+class MyStatusCommand extends EconomyAPICommand{
+	public function __construct(EconomyAPI $plugin, $cmd = "mystatus"){
+		parent::__construct($cmd, $plugin);
+		$this->setUsage("/$cmd");
+		$this->setDescription("Shows your money status");
+		$this->setPermission("economyapi.command.mystatus");
+	}
+	
+	public function execute(CommandSender $sender, $label, array $params){
+		if(!$this->getPlugin()->isEnabled() or !$this->testPermission($sender)){
+			return false;
+		}
+		
+		if(!$sender instanceof Player){
+			$sender->sendMessage("Please run this command in-game.");
+			return true;
+		}
+		
+		$money = $this->getPlugin()->getAllMoney();
+		
+		$allMoney = 0;
+		foreach($money["money"] as $m){
+			$allMoney += $m;
+		}
+		$topMoney = 0;
+		if($allMoney > 0){
+			$topMoney = round((($money["money"][$sender->getName()] / $allMoney) * 100), 2);
+		}
+		$allDebt = 0;
+		foreach($money["debt"] as $d){
+			$allDebt += $d;
+		}
+		$topDebt = 0;
+		if($allDebt > 0){
+			$topDebt = round((($money["debt"][$sender->getName()] / $allDebt) * 100), 2);
+		}
+		$sender->sendMessage($this->getPlugin()->getMessage("mystatus-show", $sender->getName(), array($topMoney, $topDebt, "%3", "%4")));
+		return true;
+	}
+}
+<?php
+
+namespace onebone\economyapi\event\money;
+
+use onebone\economyapi\event\EconomyAPIEvent;
+use onebone\economyapi\EconomyAPI;
+
+class ReduceMoneyEvent extends EconomyAPIEvent{
+	private $plugin, $username, $amount;
+	public static $handlerList;
+	
+	public function __construct(EconomyAPI $api, $username, $amount, $issuer){
+		$this->plugin = $api;
+		$this->username = $username;
+		$this->amount = $amount;
+		$this->issuer = $issuer;
+	}
+	
+	public function getUsername(){
+		return $this->username;
+	}
+	
+	public function getAmount(){
+		return $this->amount;
+	}
+}<?php
+
+namespace onebone\economyapi\event;
+
+use pocketmine\plugin\Plugin;
+use pocketmine\event\plugin\PluginEvent;
+use pocketmine\event\Cancellable;
+
+use onebone\economyapi\EconomyAPI;
+
+class EconomyAPIEvent extends PluginEvent implements Cancellable{
+	protected $issuer;
+	private $plugin;
+
+	public function __construct(EconomyAPI $plugin, $issuer){
+		$this->plugin = $plugin;
+	}
+	
+	public function getIssuer(){
+		return $this->issuer;
+	}
+}<?php
+
+namespace onebone\economyapi\event\money;
+
+use onebone\economyapi\EconomyAPI;
+use onebone\economyapi\event\EconomyAPIEvent;
+
+class MoneyChangedEvent extends EconomyAPIEvent{
+	private $plugin, $username, $money;
+	public static $handlerList;
+
+	public function __construct(EconomyAPI $api, $username, $money, $issuer){
+		$this->plugin = $api;
+		$this->username = $username;
+		$this->money = $money;
+		$this->issuer = $issuer;
+	}
+
+	/**
+	 * @return string
+	 */
+	public function getUsername(){
+		return $this->username;
+	}
+
+	/**
+	 * @return float
+	 */
+	public function getMoney(){
+		return $this->money;
+	}
+}<?php
+
+namespace onebone\economyapi\event\account;
+
+use onebone\economyapi\event\EconomyAPIEvent;
+use onebone\economyapi\EconomyAPI;
+
+class CreateAccountEvent extends EconomyAPIEvent{
+	private $player, $username, $defaultMoney, $defaultDebt, $defaultBankMoney;
+	public static $handlerList;
+	
+	public function __construct(EconomyAPI $plugin, $username, $defaultMoney, $defaultDebt, $defaultBankMoney, $issuer){
+		$this->plugin = $plugin;
+		$this->username = $username;
+		$this->defaultMoney = $defaultMoney;
+		$this->defaultBankMoney = $defaultBankMoney;
+		$this->issuer = $issuer;
+	}
+	
+	public function getUsername(){
+		return $this->username;
+	}
+	
+	public function setDefaultMoney($money){
+		$this->defaultMoney = $money;
+	}
+	
+	public function setDefaultBankMoney($money){
+		$this->defaultBankMoney = $money;
+	}
+	
+	public function setDefaultDebt($money){
+		$this->defaultDebt = $money;
+	}
+	
+	public function getDefaultMoney(){
+		return $this->defaultMoney;
+	}
+	
+	public function getDefaultBankMoney(){
+		return $this->defaultBankMoney;
+	}
+	
+	public function getDefaultDebt(){
+		return $this->defaultDebt;
+	}
+}

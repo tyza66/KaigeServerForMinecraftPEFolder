@@ -1,0 +1,75 @@
+name: EconomyTax
+main: onebone\economytax\EconomyTax
+author: onebone
+version: "2.0.2"
+api:
+- 1.0.0
+- 1.1.0
+- 1.2.0
+- 1.2.1
+- 1.3.0
+- 1.3.1
+- 1.4.0
+- 1.4.1
+depend: [EconomyAPI]
+permissions:
+ economytax.tax.avoid:
+  description: The permission that allows player to avoid paying tax
+  deafault: op<?php
+
+namespace onebone\economytax;
+
+use pocketmine\plugin\PluginBase;
+use pocketmine\utils\Config;
+use pocketmine\scheduler\CallbackTask;
+
+use onebone\economyapi\EconomyAPI;
+
+class EconomyTax extends PluginBase{
+
+	/**
+	 * @var EconomyAPI
+	 */
+	private $api;
+
+	/**
+	 * @var Config
+	 */
+	private $config;
+
+	public function onEnable(){
+		@mkdir($this->getDataFolder());
+		$this->api = EconomyAPI::getInstance();
+		$this->config = new Config($this->getDataFolder()."tax.properties", Config::PROPERTIES, array(
+			"time-for-tax" => 10,
+			"tax-as-percentage" => "",
+			"tax-as-money" => 100
+		));
+		$this->getServer()->getScheduler()->scheduleRepeatingTask(new CallbackTask(array($this, "onSchedule")), $this->config->get("time-for-tax")*1200);
+	}
+
+	public function onSchedule(){
+		if(($percent = $this->config->get("tax-as-percentage")) !== ""){
+			$players = $this->getServer()->getOnlinePlayers();
+			foreach($players as $player){
+				if($player->hasPermission("economytax.tax.avoid")){
+					continue;
+				}
+				$money = $this->api->myMoney($player);
+				$taking = $money * ($percent / 100);
+				$this->api->reduceMoney($player, min($money, $taking), true, "EconomyTax");
+				$player->sendMessage("Your ".EconomyAPI::getInstance()->getMonetaryUnit()."$taking has taken by tax.");
+			}
+		}else{
+			$money = $this->config->get("tax-as-money");
+			$players = $this->getServer()->getOnlinePlayers();
+				foreach($players as $player){
+				if($player->hasPermission("economytax.tax.avoid")){
+					continue;
+				}
+				$this->api->reduceMoney($player, min($this->api->myMoney($player), $money), true, "EconomyTax");
+				$player->sendMessage("Your ".EconomyAPI::getInstance()->getMonetaryUnit()."$money has taken by tax.");
+			}
+		}
+	}
+}
